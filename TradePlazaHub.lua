@@ -20,14 +20,19 @@
     Touche par defaut pour afficher/cacher : RightControl (Ctrl droit)
 
     Config surchargeable avant le chargement :
-      _G.TradePlazaHubConfig = { TranslateTo = "en", Keybind = Enum.KeyCode.F4 }
+      GENV.TradePlazaHubConfig = { TranslateTo = "en", Keybind = Enum.KeyCode.F4 }
 ==================================================================================
 ]]
 
+--// Table globale : getgenv() dans un executor, _G sinon
+local GENV = (getgenv and getgenv()) or _G
+
 --// Rechargement propre si deja lance
-if _G.TradePlazaHub and _G.TradePlazaHub.Unload then
-    pcall(_G.TradePlazaHub.Unload)
+if GENV.TradePlazaHub and GENV.TradePlazaHub.Unload then
+    pcall(GENV.TradePlazaHub.Unload)
 end
+
+print("[TradePlazaHub] chargement du script...")
 
 ----------------------------------------------------------------------------------
 -- SERVICES
@@ -64,8 +69,8 @@ local CONFIG = {
     RemotePaths        = {},       -- ex: { Invite = "ReplicatedStorage.Remotes.TradeService.Invite" }
 }
 
-if type(_G.TradePlazaHubConfig) == "table" then
-    for k, v in pairs(_G.TradePlazaHubConfig) do CONFIG[k] = v end
+if type(GENV.TradePlazaHubConfig) == "table" then
+    for k, v in pairs(GENV.TradePlazaHubConfig) do CONFIG[k] = v end
 end
 
 local LANGS = {
@@ -77,20 +82,14 @@ local LANGS = {
 -- ENVIRONNEMENT (executor ou pas)
 ----------------------------------------------------------------------------------
 local Env = {}
-Env.request = (syn and syn.request)
-    or (http and http.request)
-    or (fluxus and fluxus.request)
-    or rawget(getfenv(), "http_request")
-    or rawget(getfenv(), "request")
-
-Env.clipboard = rawget(getfenv(), "setclipboard")
-    or rawget(getfenv(), "toclipboard")
-    or (syn and syn.write_clipboard)
-
-Env.gethui        = rawget(getfenv(), "gethui")
-Env.hookmetamethod= rawget(getfenv(), "hookmetamethod")
-Env.getnamecall   = rawget(getfenv(), "getnamecallmethod")
-Env.checkcaller   = rawget(getfenv(), "checkcaller")
+-- en Luau, lire un global inexistant renvoie nil : pas besoin de getfenv/rawget
+Env.request       = (syn and syn.request) or (http and http.request)
+                    or (fluxus and fluxus.request) or http_request or request
+Env.clipboard     = setclipboard or toclipboard or (syn and syn.write_clipboard)
+Env.gethui        = gethui
+Env.hookmetamethod= hookmetamethod
+Env.getnamecall   = getnamecallmethod
+Env.checkcaller   = checkcaller
 Env.isExecutor    = (Env.request ~= nil) or (Env.hookmetamethod ~= nil)
 
 local function spawnTask(fn)
@@ -1081,13 +1080,29 @@ local THEME = {
 
 UI = { pages = {}, tabs = {}, lists = {} }
 
+-- Certaines proprietes n'existent pas sur toutes les versions du client.
+-- On les applique une par une : une propriete refusee est ignoree au lieu de
+-- faire planter la construction de toute l'interface.
 local function mk(class, props)
-    local inst = Instance.new(class)
+    local ok, inst = pcall(Instance.new, class)
+    if not ok or not inst then
+        warn("[TradePlazaHub] classe impossible a creer : " .. tostring(class))
+        inst = Instance.new("Frame")
+    end
     local parent = nil
     for k, v in pairs(props or {}) do
-        if k == "Parent" then parent = v else inst[k] = v end
+        if k == "Parent" then
+            parent = v
+        else
+            local applied = pcall(function() inst[k] = v end)
+            if not applied then
+                warn(string.format("[TradePlazaHub] propriete ignoree : %s.%s", class, tostring(k)))
+            end
+        end
     end
-    if parent then inst.Parent = parent end
+    if parent then
+        pcall(function() inst.Parent = parent end)
+    end
     return inst
 end
 
@@ -1279,15 +1294,17 @@ local function addTab(name)
         ScrollBarThickness = 4,
         ScrollBarImageColor3 = THEME.accent,
         CanvasSize = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y,
         Visible = false,
         Parent = content,
     })
-    mk("UIListLayout", {
+    local layout = mk("UIListLayout", {
         Padding = UDim.new(0, 6),
         SortOrder = Enum.SortOrder.LayoutOrder,
         Parent = page,
     })
+    Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        page.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+    end))
 
     local btn = corner(mk("TextButton", {
         Size = UDim2.new(1, 0, 0, 30),
@@ -1487,14 +1504,16 @@ local function listBox(page, height)
         ScrollBarThickness = 4,
         ScrollBarImageColor3 = THEME.accent,
         CanvasSize = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y,
         Parent = holder,
     })
-    mk("UIListLayout", {
+    local layout = mk("UIListLayout", {
         Padding = UDim.new(0, 3),
         SortOrder = Enum.SortOrder.LayoutOrder,
         Parent = scroll,
     })
+    Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 6)
+    end))
     return scroll
 end
 
@@ -1960,7 +1979,7 @@ button(pageInfo, "Recharger les modules (remotes + chat)", function()
 end)
 
 button(pageInfo, "Fermer le hub (unload)", function()
-    if _G.TradePlazaHub and _G.TradePlazaHub.Unload then _G.TradePlazaHub.Unload() end
+    if GENV.TradePlazaHub and GENV.TradePlazaHub.Unload then GENV.TradePlazaHub.Unload() end
 end, nil, THEME.danger)
 
 ----------------------------------------------------------------------------------
@@ -1974,7 +1993,7 @@ titleButton("-", THEME.text, -62, function()
 end)
 
 titleButton("X", THEME.danger, -32, function()
-    if _G.TradePlazaHub and _G.TradePlazaHub.Unload then _G.TradePlazaHub.Unload() end
+    if GENV.TradePlazaHub and GENV.TradePlazaHub.Unload then GENV.TradePlazaHub.Unload() end
 end)
 
 Maid.conn(UserInputService.InputBegan:Connect(function(inputObj, processed)
@@ -1992,11 +2011,11 @@ local function unload()
     State.Unloaded = true
     setNoclip(false)
     Maid.clean()
-    _G.TradePlazaHub = nil
+    GENV.TradePlazaHub = nil
     print("[TradePlazaHub] decharge.")
 end
 
-_G.TradePlazaHub = {
+GENV.TradePlazaHub = {
     Config    = CONFIG,
     State     = State,
     Remotes   = Remotes,
@@ -2025,7 +2044,7 @@ Maid.conn(Players.PlayerRemoving:Connect(function()
     end
 end))
 
-spawnTask(function()
+local function init()
     log("demarrage (executor: %s)", tostring(Env.isExecutor))
 
     local invite = Remotes:Find("Invite")
@@ -2051,12 +2070,23 @@ spawnTask(function()
         "Hook chat sortant : " .. ((Env.hookmetamethod and Env.getnamecall) and "possible" or "indispo"),
         "Remote Invite : " .. (invite and invite:GetFullName() or "introuvable"),
         "Remote Chat : " .. (Chat.remote and Chat.remote:GetFullName() or "introuvable"),
-        "API console : _G.TradePlazaHub",
+        "API console : GENV.TradePlazaHub",
     }, "\n")
     infoLabel.TextColor3 = THEME.text
 
     setStatus("pret - " .. tostring(CONFIG.Keybind.Name) .. " pour cacher", THEME.ok)
     notify("Trade Plaza Hub", "Charge. " .. tostring(CONFIG.Keybind.Name) .. " pour afficher/cacher.", 6)
+end
+
+spawnTask(function()
+    local ok, err = pcall(init)
+    if not ok then
+        setStatus("erreur init (voir console F9)", THEME.danger)
+        log("ERREUR INIT : %s", tostring(err))
+        warn("[TradePlazaHub] ERREUR INIT : " .. tostring(err))
+    end
 end)
 
-return _G.TradePlazaHub
+print("[TradePlazaHub] interface construite. Raccourci : " .. tostring(CONFIG.Keybind.Name))
+
+return GENV.TradePlazaHub
