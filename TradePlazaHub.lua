@@ -19,11 +19,10 @@
       - hookmetamethod sur __namecall
         -> detectable cote client, quoi qu'on en fasse.
 
-    4 onglets :
-      JOUEURS  - liste avec la tete de chaque joueur
-      BASE     - scanner de brainrots avec apercu 3D, mutation et revenu/s
-      CHAT     - traducteur du chat (lecture) + traduction a coller toi-meme
-      REGLAGES - langues, affichage, journal
+    3 onglets, fenetre en format paysage :
+      JOUEURS  - la liste a gauche, la base du joueur choisi a droite
+      CHAT     - la conversation traduite a gauche, les langues a droite
+      REGLAGES - police des messages, avatars, taille des apercus 3D
 
     Touche menu : RightControl
 ==================================================================================
@@ -76,6 +75,8 @@ local CONFIG = {
     SendAs            = LANGUE_REPLI,
     TranslateIncoming = true,
     PatchChatGui      = true,
+    AutoSend          = true,   -- Entree envoie directement dans le chat du jeu
+                                -- au lieu de laisser le texte dans la zone
     TranslateButtons  = false,  -- les boutons du jeu (Deal?, Last Offer...) sont
                                 -- de l'interface, pas des messages : on les laisse
 
@@ -944,12 +945,16 @@ local Chat = { remote = nil, rootInst = nil, seen = {}, written = {},
 local recentChat = {}
 
 local function pushChat(entry)
-    local key = tostring(entry.original or entry.translated or "")
+    -- On enregistre l'original ET la traduction. Ton propre message revient
+    -- par le chat du jeu dans l'autre langue : sans les deux cles, il
+    -- s'affichait une deuxieme fois.
+    local a = tostring(entry.original or "")
+    local b = tostring(entry.translated or "")
     local now = Util.clock()
-    if key ~= "" then
-        if recentChat[key] and (now - recentChat[key]) < 4 then return end
-        recentChat[key] = now
-    end
+    if (a ~= "" and recentChat[a] and (now - recentChat[a]) < 6)
+    or (b ~= "" and recentChat[b] and (now - recentChat[b]) < 6) then return end
+    if a ~= "" then recentChat[a] = now end
+    if b ~= "" then recentChat[b] = now end
     entry.at = os.date("%H:%M")
     table.insert(State.ChatLog, entry)
     if #State.ChatLog > 120 then table.remove(State.ChatLog, 1) end
@@ -978,30 +983,44 @@ end
 -- Qui a ecrit ce message ? On remonte de trois crans dans la ligne du chat et
 -- on cherche soit une image d'avatar (l'UserId est dans l'URL), soit un label
 -- qui porte le pseudo d'un joueur present.
-local function senderOf(obj)
-    local node = obj.Parent
-    for _ = 1, 3 do
-        if not node then break end
-        local ok, list = pcall(function() return node:GetDescendants() end)
-        if ok then
-            for _, d in ipairs(list) do
-                if d:IsA("ImageLabel") or d:IsA("ImageButton") then
-                    -- l'UserId apparait sous plusieurs formes selon le jeu :
-                    -- rbxthumb://type=AvatarHeadShot&id=123, ?userId=123, ...
-                    -- on prend toute suite de 6 chiffres ou plus et on compare
-                    local img = tostring(d.Image or "")
-                    for id in string.gmatch(img, "(%d%d%d%d%d%d+)") do
-                        for _, plr in ipairs(Players:GetPlayers()) do
-                            if tostring(plr.UserId) == id then return plr end
-                        end
-                    end
-                elseif d ~= obj and (d:IsA("TextLabel") or d:IsA("TextButton")) then
-                    local plr = exactPlayer(d.Text)
-                    if plr then return plr end
-                end
+-- un joueur reconnu depuis un element d'interface : soit son UserId dans
+-- l'URL d'une miniature, soit son pseudo ecrit en clair
+local function playerFromGui(d, skip)
+    if d == skip then return nil end
+    if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+        -- l'UserId apparait sous plusieurs formes selon le jeu :
+        -- rbxthumb://type=AvatarHeadShot&id=123, ?userId=123, ...
+        local img = tostring(d.Image or "")
+        for id in string.gmatch(img, "(%d%d%d%d%d%d+)") do
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if tostring(plr.UserId) == id then return plr end
             end
         end
-        node = node.Parent
+    elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+        return exactPlayer(d.Text)
+    end
+    return nil
+end
+
+-- On reste dans LA ligne du message : son parent et un niveau en dessous.
+-- Remonter plus haut ramenait le conteneur de tout le chat, donc l'avatar
+-- d'une AUTRE ligne : chaque message se retrouvait attribue au mauvais
+-- joueur, et ceux attribues a soi-meme etaient purement ignores.
+local function senderOf(obj)
+    local row = obj.Parent
+    if not row then return nil end
+    local ok, kids = pcall(function() return row:GetChildren() end)
+    if not ok then return nil end
+    for _, d in ipairs(kids) do
+        local plr = playerFromGui(d, obj)
+        if plr then return plr end
+        local ok2, subs = pcall(function() return d:GetChildren() end)
+        if ok2 then
+            for _, sub in ipairs(subs) do
+                local p2 = playerFromGui(sub, obj)
+                if p2 then return p2 end
+            end
+        end
     end
     return nil
 end
@@ -1065,17 +1084,28 @@ function Chat.compose(text, translateTo)
         end
     end
 
-    local box, written = Chat.inputBox(), false
+    local box, written, sent = Chat.inputBox(), false, false
     if box then
         -- focus d'abord : si la TextBox a ClearTextOnFocus, elle se vide
         -- avant qu'on ecrive et pas apres
         pcall(function() box:CaptureFocus() end)
         written = pcall(function() box.Text = final end)
         pcall(function() box.CursorPosition = #final + 1 end)
+
+        if written and CONFIG.AutoSend then
+            -- ReleaseFocus(true) declenche FocusLost avec enterPressed = true.
+            -- C'est le CODE DU JEU qui envoie alors le message, avec ses
+            -- propres arguments : le hub n'appelle toujours aucun remote.
+            pcall(function() box:ReleaseFocus(true) end)
+            local waited = 0
+            while waited < 0.15 do waited = waited + RunService.Heartbeat:Wait() end
+            -- si le jeu a vide la zone, c'est qu'il a pris le message
+            sent = (Util.trim(box.Text or "") ~= final)
+        end
     end
 
     pushChat(meEntry(text, (final ~= text) and final or nil))
-    return true, final, written, Util.copy(final)
+    return true, final, written, Util.copy(final), sent
 end
 
 local function extractMessage(...)
@@ -1289,9 +1319,10 @@ local function handleText(obj, silent)
         -- Un message que le traducteur refuse ne doit pas disparaitre.
         if out and UI and UI.setDetected then pcall(UI.setDetected, detected) end
 
-        -- nos propres messages sont deja affiches au moment ou on les ecrit :
-        -- on ne les remet pas une seconde fois depuis le chat du jeu
-        if not silent and sender ~= LocalPlayer then
+        -- On ne filtre plus sur l'auteur : quand il etait mal identifie, le
+        -- message disparaissait sans laisser de trace. Les doublons sont
+        -- ecartes par pushChat, qui connait les deux versions du texte.
+        if not silent then
             pushChat({
                 who = sender and ((sender.DisplayName ~= "" and sender.DisplayName)
                       or sender.Name) or "joueur",
@@ -1385,7 +1416,7 @@ function Chat.patchGui()
     end
 end
 
--- relance un balayage complet (bouton "Rescanner le chat")
+-- relance un balayage complet du chat (accessible via getgenv().TradePlazaHub)
 -- retourne : elements de chat trouves, chemin du cadre, chemin exact ?
 function Chat.rescan()
     Chat.seen, Chat.written, Chat.rootInst = {}, {}, nil
@@ -1700,7 +1731,7 @@ local screen = mk("ScreenGui", {
 Maid.inst(screen)
 if syn and syn.protect_gui then pcall(syn.protect_gui, screen) end
 
-local WIN_W, WIN_H = 560, 400
+local WIN_W, WIN_H = 820, 360
 
 local window = corner(mk("Frame", {
     Size = UDim2.new(0, WIN_W, 0, WIN_H),
@@ -1785,14 +1816,14 @@ local bodyFrame = mk("Frame", {
 })
 
 local sidebar = mk("Frame", {
-    Size = UDim2.new(0, 112, 1, 0), BackgroundColor3 = THEME.surface,
+    Size = UDim2.new(0, 132, 1, 0), BackgroundColor3 = THEME.surface,
     BorderSizePixel = 0, Parent = bodyFrame,
 })
 listLayout(sidebar, 4)
 pad(sidebar, 10)
 
 local contentArea = mk("Frame", {
-    Size = UDim2.new(1, -112, 1, 0), Position = UDim2.new(0, 112, 0, 0),
+    Size = UDim2.new(1, -132, 1, 0), Position = UDim2.new(0, 132, 0, 0),
     BackgroundTransparency = 1, Parent = bodyFrame,
 })
 
@@ -1848,7 +1879,7 @@ end
 ----------------------------------------------------------------------------------
 -- COMPOSANTS
 ----------------------------------------------------------------------------------
-local function addTab(name)
+local function addTab(name, icon)
     local page = mk("ScrollingFrame", {
         Name = name, Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 12, 0, 8),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
@@ -1870,17 +1901,24 @@ local function addTab(name)
         AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = THEME.accent,
         BorderSizePixel = 0, Parent = tab,
     }), 2)
+    local tabIcon = mk("TextLabel", {
+        Size = UDim2.new(0, 20, 1, 0), Position = UDim2.new(0, 11, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = icon or "", TextSize = 14, TextColor3 = THEME.sub, Parent = tab,
+    })
     local tabLabel = mk("TextLabel", {
-        Size = UDim2.new(1, -16, 1, 0), Position = UDim2.new(0, 16, 0, 0),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = name,
+        Size = UDim2.new(1, -40, 1, 0), Position = UDim2.new(0, 36, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = name,
         TextSize = 12, TextColor3 = THEME.sub,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = tab,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = tab,
     })
 
     local tabGlow = glowStroke(tab, 1.4, 1, 34)
 
     UI.pages[name] = page
-    UI.tabs[name] = { button = tab, label = tabLabel, mark = mark, glow = tabGlow }
+    UI.tabs[name] = { button = tab, label = tabLabel, mark = mark,
+                      glow = tabGlow, icon = tabIcon }
 
     Maid.conn(tab.MouseEnter:Connect(function()
         if not page.Visible then tween(tab, { BackgroundTransparency = 0.5 }, 0.15) end
@@ -1901,6 +1939,7 @@ function UI.select(name)
         tween(t.label, { TextColor3 = active and THEME.text or THEME.sub }, 0.16)
         tween(t.mark, { Size = UDim2.new(0, 3, 0, active and 20 or 0) }, 0.18)
         tween(t.glow, { Transparency = active and 0.25 or 1 }, 0.2)
+        tween(t.icon, { TextColor3 = active and THEME.accent2 or THEME.sub }, 0.16)
     end
 end
 
@@ -1965,9 +2004,23 @@ local function btn(parent, opts)
         Size = opts.width and UDim2.new(0, opts.width, 0, opts.height or 32)
                           or UDim2.new(1, 0, 0, opts.height or 32),
         BackgroundColor3 = base, AutoButtonColor = false, Font = Enum.Font.GothamBold,
-        Text = opts.text, TextSize = opts.textSize or 12, TextColor3 = textColor,
-        BorderSizePixel = 0, Parent = parent,
+        Text = (opts.icon and (opts.icon .. "  ") or "") .. opts.text,
+        TextSize = opts.textSize or 12, TextColor3 = textColor,
+        BorderSizePixel = 0, ClipsDescendants = true, Parent = parent,
     }), 8)
+
+    -- relief : un liseré clair en haut, une levre sombre en bas. Le bouton a
+    -- une epaisseur au lieu d'etre un rectangle plat.
+    local sheen = mk("Frame", {
+        Size = UDim2.new(1, -10, 0, 1), Position = UDim2.new(0, 5, 0, 1),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = 0.82,
+        BorderSizePixel = 0, ZIndex = 0, Parent = b,
+    })
+    local lip = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 3), Position = UDim2.new(0, 0, 1, -3),
+        BackgroundColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 0.68,
+        BorderSizePixel = 0, ZIndex = 0, Parent = b,
+    })
     local halo = mk("UIStroke", {
         Color = THEME.accent2, Thickness = 1.4, Transparency = 1,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = b,
@@ -1977,10 +2030,21 @@ local function btn(parent, opts)
     Maid.conn(b.MouseEnter:Connect(function()
         tween(b, { BackgroundColor3 = hover }, 0.14)
         tween(halo, { Transparency = 0.15, Thickness = 2 }, 0.16)
+        tween(sheen, { BackgroundTransparency = 0.6 }, 0.16)
     end))
     Maid.conn(b.MouseLeave:Connect(function()
         tween(b, { BackgroundColor3 = base }, 0.14)
         tween(halo, { Transparency = 1, Thickness = 1.4 }, 0.22)
+        tween(sheen, { BackgroundTransparency = 0.82 }, 0.22)
+    end))
+    -- enfonce : la levre s'ecrase, le fond s'assombrit
+    Maid.conn(b.MouseButton1Down:Connect(function()
+        tween(lip, { Size = UDim2.new(1, 0, 0, 1) }, 0.06)
+        tween(b, { BackgroundColor3 = base:Lerp(Color3.new(0, 0, 0), 0.22) }, 0.06)
+    end))
+    Maid.conn(b.MouseButton1Up:Connect(function()
+        tween(lip, { Size = UDim2.new(1, 0, 0, 3) }, 0.12)
+        tween(b, { BackgroundColor3 = hover }, 0.12)
     end))
     Maid.conn(b.MouseButton1Click:Connect(function()
         spawnTask(function()
@@ -2147,6 +2211,25 @@ local function hpanel(parent, height)
     return scroll, holder
 end
 
+-- deux colonnes cote a cote : c'est ce qui rend le format paysage utile
+local function split(page, height, leftScale)
+    leftScale = leftScale or 0.5
+    local holder = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, height), BackgroundTransparency = 1, Parent = page,
+    })
+    local left = mk("Frame", {
+        Size = UDim2.new(leftScale, -6, 1, 0), BackgroundTransparency = 1, Parent = holder,
+    })
+    listLayout(left, 10)
+    local right = mk("Frame", {
+        Size = UDim2.new(1 - leftScale, -6, 1, 0),
+        Position = UDim2.new(leftScale, 6, 0, 0),
+        BackgroundTransparency = 1, Parent = holder,
+    })
+    listLayout(right, 10)
+    return left, right
+end
+
 local function textLine(scroll, text, color, font)
     return mk("TextLabel", {
         Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
@@ -2273,17 +2356,18 @@ local scanBase, refreshPlayers
 ----------------------------------------------------------------------------------
 -- ONGLET : JOUEURS  (la liste, et la base du joueur choisi juste en dessous)
 ----------------------------------------------------------------------------------
-local pagePlayers = addTab("Joueurs")
+local pagePlayers = addTab("Joueurs", "\240\159\145\165")
 
-local cardList = card(pagePlayers, "Joueurs du serveur",
-    "VOIR LA BASE affiche ses brainrots juste en dessous")
-local playersPanel = panel(cardList, 186)
-btn(cardList, { text = "Rafraichir", callback = function()
+local colPlayersL, colPlayersR = split(pagePlayers, 268, 0.38)
+
+local cardList = card(colPlayersL, "Joueurs du serveur")
+local playersPanel = panel(cardList, 158)
+btn(cardList, { text = "Rafraichir", icon = "\226\159\179", callback = function()
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
 end })
 
-local cardBase = card(pagePlayers, "Base")
+local cardBase = card(colPlayersR, "Base")
 local baseSummary = note(cardBase, "choisis un joueur pour voir ses brainrots", THEME.text)
 local brainrotPanel, brainrotHolder = hpanel(cardBase, 190)
 
@@ -2298,23 +2382,23 @@ local function playerRow(scroll, plr)
     head.Position = UDim2.new(0, 8, 0.5, -17)
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -190, 0, 15), Position = UDim2.new(0, 50, 0, 8),
+        Size = UDim2.new(1, -156, 0, 15), Position = UDim2.new(0, 50, 0, 8),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = plr.DisplayName ~= "" and plr.DisplayName or plr.Name, TextSize = 12,
         TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, -190, 0, 13), Position = UDim2.new(0, 50, 0, 25),
+        Size = UDim2.new(1, -156, 0, 13), Position = UDim2.new(0, 50, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
         Text = "@" .. plr.Name .. "   -   " .. plr.UserId, TextSize = 10,
         TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local see = btn(row, { text = "VOIR LA BASE", width = 126, height = 30,
-        style = "primary", callback = function() scanBase(plr) end })
-    see.Position = UDim2.new(1, -134, 0.5, -15)
+    local see = btn(row, { text = "BASE", icon = "\240\159\148\141", width = 92,
+        height = 30, style = "primary", callback = function() scanBase(plr) end })
+    see.Position = UDim2.new(1, -100, 0.5, -15)
     return row
 end
 
@@ -2459,11 +2543,13 @@ end
 ----------------------------------------------------------------------------------
 -- ONGLET : CHAT
 ----------------------------------------------------------------------------------
-local pageChat = addTab("Chat")
+local pageChat = addTab("Chat", "\240\159\146\172")
+
+local colChatL, colChatR = split(pageChat, 268, 0.58)
 
 local refreshLangNote
 
-local cardLang = card(pageChat, "Langues",
+local cardLang = card(colChatR, "Langues",
     "coche ta langue : tout ce que tu lis arrive dedans")
 listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function()
     refreshLangNote()
@@ -2498,9 +2584,8 @@ end
 
 refreshLangNote()
 
-local cardConv = card(pageChat, "Conversation",
-    "vide au demarrage, elle se remplit a mesure que vous parlez")
-local chatPanel = panel(cardConv, 178)
+local cardConv = card(colChatL, "Conversation")
+local chatPanel = panel(cardConv, 120)
 
 local sendReply
 local chatField = field(cardConv, "ecris dans ta langue...   (Entree pour envoyer)",
@@ -2511,12 +2596,15 @@ local rowSend = rowOf(cardConv, 36)
 -- ecrit dans la zone de saisie du chat du jeu
 sendReply = function(text)
     local lang, fromDetection = Chat.replyLang()
-    local ok, msg, written, copied = Chat.compose(text, lang)
+    local ok, msg, written, copied, sent = Chat.compose(text, lang)
     if not ok then setStatus(tostring(msg), THEME.bad) return end
     chatField.Text = ""
     local how = " [" .. langName(lang) .. (fromDetection and " detecte]" or " repli]")
-    if written then
-        setStatus("ecrit dans le chat" .. how .. " : " .. tostring(msg), THEME.good)
+    if sent then
+        setStatus("envoye" .. how .. " : " .. tostring(msg), THEME.good)
+    elseif written then
+        setStatus("ecrit dans le chat, appuie sur Entree" .. how .. " : "
+            .. tostring(msg), THEME.warn)
     elseif copied then
         setStatus("zone de saisie introuvable, copie" .. how .. " : " .. tostring(msg), THEME.warn)
     else
@@ -2524,24 +2612,15 @@ sendReply = function(text)
     end
 end
 
-btn(rowSend, { text = "ENVOYER DANS LE CHAT", width = 214, height = 36, style = "primary",
-    callback = function() sendReply(chatField.Text) end })
-btn(rowSend, { text = "Effacer", width = 104, height = 36, callback = function()
-    chatField.Text = ""
-    State.ChatLog = {}
-    clearChildren(chatPanel)
-    setStatus("conversation effacee", THEME.sub)
-end })
-
-local chatDiag = note(cardConv, "cadre de chat : pas encore scanne", THEME.sub)
-btn(cardConv, { text = "Rescanner le chat du jeu", callback = function()
-    local n, where, exact = Chat.rescan()
-    chatDiag.Text = (exact and "cadre trouve : " or "detection par mot-cle : ")
-        .. tostring(where) .. "   -   " .. tostring(n) .. " element(s) de texte"
-    setStatus(n > 0 and (n .. " element(s) de chat trouve(s), traduction relancee")
-        or "aucun chat trouve - ouvre le Trade Chat dans le jeu puis reclique",
-        n > 0 and THEME.good or THEME.warn)
-end })
+btn(rowSend, { text = "ENVOYER", icon = "\240\159\154\128", width = 150, height = 36,
+    style = "primary", callback = function() sendReply(chatField.Text) end })
+btn(rowSend, { text = "Effacer", icon = "\226\156\150", width = 118, height = 36,
+    callback = function()
+        chatField.Text = ""
+        State.ChatLog = {}
+        clearChildren(chatPanel)
+        setStatus("conversation effacee", THEME.sub)
+    end })
 
 -- Hauteur d'un texte enroule sur une largeur donnee. On mesure au lieu de
 -- laisser AutomaticSize se debrouiller : imbrique dans un ScrollingFrame,
@@ -2558,7 +2637,7 @@ end
 local function chatWidth()
     local w = chatPanel.AbsoluteSize.X
     if w and w > 90 then return w end
-    return 384
+    return 340
 end
 
 -- Une ligne = qui parle (tete + pseudo) et ce qu'il dit, rien d'autre.
@@ -2652,7 +2731,7 @@ end
 ----------------------------------------------------------------------------------
 -- ONGLET : REGLAGES
 ----------------------------------------------------------------------------------
-local pageSettings = addTab("Reglages")
+local pageSettings = addTab("Reglages", "\226\154\153")
 
 local cardStyle = card(pageSettings, "Style du chat",
     "police des messages de la conversation")
