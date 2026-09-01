@@ -73,6 +73,7 @@ local CONFIG = {
     -- affichage
     ShowAvatars  = true,
     ShowModels   = true,
+    ChatFont     = "FredokaOne",  -- police des messages (onglet Reglages)
     ModelSize    = 110,         -- taille de l'apercu 3D des brainrots (px)
 
     -- decor de la base pris a tort pour un brainrot : compare en minuscules,
@@ -90,6 +91,12 @@ end
 local LANGS = {
     "fr","en","es","pt","pt-BR","de","it","nl","pl","tr","ru","uk","ar",
     "id","ms","vi","th","fil","ja","ko","zh-CN","hi","ro","sv",
+}
+
+-- polices proposees pour les messages
+local CHAT_FONTS = {
+    "FredokaOne", "GothamBold", "Nunito", "Ubuntu", "Oswald",
+    "Michroma", "Bangers", "PermanentMarker", "Arimo",
 }
 
 local LANG_NAMES = {
@@ -861,11 +868,61 @@ end
 local Chat = { remote = nil, rootInst = nil, seen = {}, written = {},
                boxes = {}, listened = {} }
 
-local function pushChat(who, original, translated)
-    local entry = { who = who, original = original, translated = translated, at = os.date("%H:%M") }
+-- entry = { who, userId, original, translated, mine }
+local function pushChat(entry)
+    entry.at = os.date("%H:%M")
     table.insert(State.ChatLog, entry)
-    if #State.ChatLog > 100 then table.remove(State.ChatLog, 1) end
+    if #State.ChatLog > 120 then table.remove(State.ChatLog, 1) end
     if UI and UI.pushChat then pcall(UI.pushChat, entry) end
+end
+
+local function meEntry(original, translated)
+    return {
+        who = (LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName) or LocalPlayer.Name,
+        userId = LocalPlayer.UserId, original = original, translated = translated,
+        mine = true,
+    }
+end
+
+-- recherche stricte : pas de correspondance partielle, sinon "a" trouverait
+-- n'importe quel joueur dont le nom contient un "a"
+local function exactPlayer(name)
+    local n = Util.lower(Util.trim(name or ""))
+    if n == "" then return nil end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if Util.lower(plr.Name) == n or Util.lower(plr.DisplayName) == n then return plr end
+    end
+    return nil
+end
+
+-- Qui a ecrit ce message ? On remonte de trois crans dans la ligne du chat et
+-- on cherche soit une image d'avatar (l'UserId est dans l'URL), soit un label
+-- qui porte le pseudo d'un joueur present.
+local function senderOf(obj)
+    local node = obj.Parent
+    for _ = 1, 3 do
+        if not node then break end
+        local ok, list = pcall(function() return node:GetDescendants() end)
+        if ok then
+            for _, d in ipairs(list) do
+                if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                    local img = tostring(d.Image or "")
+                    local id = string.match(img, "userId=(%d+)")
+                        or string.match(img, "[%?&]id=(%d+)")
+                    if id then
+                        for _, plr in ipairs(Players:GetPlayers()) do
+                            if tostring(plr.UserId) == id then return plr end
+                        end
+                    end
+                elseif d ~= obj and (d:IsA("TextLabel") or d:IsA("TextButton")) then
+                    local plr = exactPlayer(d.Text)
+                    if plr then return plr end
+                end
+            end
+        end
+        node = node.Parent
+    end
+    return nil
 end
 
 -- uniquement pour s'y ABONNER (OnClientEvent), jamais pour y envoyer
@@ -922,7 +979,7 @@ function Chat.compose(text, translateTo)
             final = out
         else
             -- on garde quand meme une trace de ce que tu voulais dire
-            pushChat("a envoyer (non traduit)", text, nil)
+            pushChat(meEntry(text, nil))
             return false, "traduction impossible (" .. tostring(info) .. ")"
         end
     end
@@ -936,7 +993,7 @@ function Chat.compose(text, translateTo)
         pcall(function() box.CursorPosition = #final + 1 end)
     end
 
-    pushChat("a envoyer", text, (final ~= text) and final or nil)
+    pushChat(meEntry(text, (final ~= text) and final or nil))
     return true, final, written, Util.copy(final)
 end
 
@@ -976,7 +1033,12 @@ function Chat.hookIncoming()
                 if not message or sender == LocalPlayer then return end
                 spawnTask(function()
                     local out = Translator.translate(message, CONFIG.TranslateTo)
-                    pushChat(sender and sender.Name or "eux", message, out)
+                    pushChat({
+                        who = sender and ((sender.DisplayName ~= "" and sender.DisplayName)
+                              or sender.Name) or "joueur",
+                        userId = sender and sender.UserId or nil,
+                        original = message, translated = out,
+                    })
                     if out and out ~= message then
                         notify(sender and sender.Name or "Trade", out, 6)
                     end
@@ -1071,9 +1133,12 @@ local function looksLikeMessage(text)
     return true
 end
 
--- traduit un TextLabel ou un TextButton et se rebranche sur ses changements
--- de texte : les jeux reutilisent les memes lignes quand le chat defile
-local function handleText(obj)
+-- Traduit un message du chat du jeu et se rebranche sur ses changements de
+-- texte : les jeux reutilisent les memes lignes quand le chat defile.
+--   silent = on traduit dans le jeu mais on n'ajoute RIEN a la conversation
+--   du hub. Sert au balayage de depart : la conversation demarre vide et ne
+--   se remplit qu'avec ce qui est dit apres.
+local function handleText(obj, silent)
     if State.Unloaded then return end
     if not (CONFIG.PatchChatGui and CONFIG.TranslateIncoming) then return end
     local original = plainText(obj)
@@ -1082,28 +1147,45 @@ local function handleText(obj)
     if Chat.seen[obj] == original then return end      -- deja traite
     Chat.seen[obj] = original
 
+    -- "Pseudo: message" : on isole l'auteur et on ne traduit que son texte
+    local prefix, body, sender = "", original, nil
+    local who, rest = string.match(original, "^([%w_%. ]-)%s*:%s*(.+)$")
+    if who and rest then
+        local plr = exactPlayer(who)
+        if plr then
+            sender, body = plr, Util.trim(rest)
+            prefix = string.sub(original, 1, #original - #rest)
+        end
+    end
+    if not sender then sender = senderOf(obj) end
+
     spawnTask(function()
-        local out, detected = Translator.translate(original, CONFIG.TranslateTo)
+        local out, detected = Translator.translate(body, CONFIG.TranslateTo)
         if State.Unloaded then return end
 
         -- Le message apparait dans le hub MEME quand la traduction echoue.
-        -- Avant, un message que le traducteur refusait disparaissait
-        -- completement : c'est pour ca que "Oui" ne s'affichait nulle part.
-        if out then
-            if UI and UI.setDetected then pcall(UI.setDetected, detected) end
-            pushChat("chat/" .. tostring(detected), original,
-                (out ~= original) and out or nil)
-        else
-            pushChat("chat (non traduit)", original, nil)
-            log("traduction indisponible pour \"%s\" : %s", original, tostring(detected))
+        -- Un message que le traducteur refuse ne doit pas disparaitre.
+        if out and UI and UI.setDetected then pcall(UI.setDetected, detected) end
+
+        -- nos propres messages sont deja affiches au moment ou on les ecrit :
+        -- on ne les remet pas une seconde fois depuis le chat du jeu
+        if not silent and sender ~= LocalPlayer then
+            pushChat({
+                who = sender and ((sender.DisplayName ~= "" and sender.DisplayName)
+                      or sender.Name) or "joueur",
+                userId = sender and sender.UserId or nil,
+                original = body, translated = out,
+            })
+        end
+        if not out then
+            log("traduction indisponible pour \"%s\" : %s", body, tostring(detected))
         end
 
-        if not out or out == original then return end
+        if not out or out == body then return end
         if not obj.Parent then return end
-        -- on remplace par la seule traduction : le "original | traduction"
-        -- doublait la longueur des lignes pour rien
-        Chat.written[obj] = out
-        pcall(function() obj.Text = out end)
+        local final = prefix .. out
+        Chat.written[obj] = final
+        pcall(function() obj.Text = final end)
     end)
 end
 
@@ -1125,7 +1207,7 @@ local function watchBox(box)
         if not looksLikeMessage(txt) then return end
         spawnTask(function()
             local out = Translator.translate(txt, CONFIG.TranslateTo)
-            pushChat("moi", txt, (out and out ~= txt) and out or nil)
+            pushChat(meEntry(txt, (out and out ~= txt) and out or nil))
         end)
     end))
 end
@@ -1138,21 +1220,18 @@ local function isTextDisplay(inst)
     return CONFIG.TranslateButtons and inst:IsA("TextButton") or false
 end
 
-local function handleAny(inst)
+local function handleAny(inst, silent)
     if not onChatPath(inst) then return end
     if inst:IsA("TextButton") and not CONFIG.TranslateButtons then return end
     if isTextDisplay(inst) then
         if Chat.seen[inst] == nil then
             Maid.conn(inst:GetPropertyChangedSignal("Text"):Connect(function()
-                handleText(inst)
+                handleText(inst)          -- un changement de texte est un vrai message
             end))
         end
-        handleText(inst)
+        handleText(inst, silent)
     elseif inst:IsA("TextBox") then
         watchBox(inst)
-        -- la zone de saisie affiche aussi le texte de l'autre dans certains
-        -- jeux : on la traite en lecture comme un label
-        handleText(inst)
     end
 end
 
@@ -1170,8 +1249,9 @@ function Chat.patchGui()
         if State.Unloaded or not isTextThing(d) then return end
         spawnTask(function() waitFor(0.15) pcall(handleAny, d) end)
     end))
+    -- balayage de depart en silencieux : la conversation du hub reste vide
     for _, d in ipairs(pg:GetDescendants()) do
-        if isTextThing(d) then pcall(handleAny, d) end
+        if isTextThing(d) then pcall(handleAny, d, true) end
     end
 
     local root, exact = Chat.root()
@@ -1194,7 +1274,7 @@ function Chat.rescan()
     for _, d in ipairs(pg:GetDescendants()) do
         if isTextThing(d) then
             if onChatPath(d) then n = n + 1 end
-            pcall(handleAny, d)
+            pcall(handleAny, d, true)
         end
     end
     Chat.hookIncoming()
@@ -1217,6 +1297,7 @@ local THEME = {
     good    = Color3.fromRGB(78, 216, 148),
     warn    = Color3.fromRGB(255, 190, 92),
     bad     = Color3.fromRGB(255, 96, 112),
+    msg     = Color3.fromRGB(255, 92, 98),   -- texte des messages du chat
 }
 
 UI = { pages = {}, tabs = {} }
@@ -1684,41 +1765,6 @@ local function switch(parent, text, key, callback)
     return holder
 end
 
-local function chips(parent, values, key, callback)
-    local holder = mk("Frame", {
-        Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = parent,
-    })
-    listLayout(holder, 6, true)
-    local buttons, labels = {}, {}
-    local function refresh()
-        for value, b in pairs(buttons) do
-            local active = (CONFIG[key] == value)
-            tween(b, { BackgroundColor3 = active and THEME.accent or THEME.surface }, 0.15)
-            tween(labels[value], { TextColor3 = active and THEME.bg or THEME.sub }, 0.15)
-        end
-    end
-    for _, value in ipairs(values) do
-        local b = corner(mk("TextButton", {
-            Size = UDim2.new(0, math.max(64, #tostring(value) * 9 + 24), 1, 0),
-            BackgroundColor3 = THEME.surface, AutoButtonColor = false, Text = "",
-            BorderSizePixel = 0, Parent = holder,
-        }), 8)
-        local lbl = mk("TextLabel", {
-            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-            Font = Enum.Font.GothamMedium, Text = tostring(value), TextSize = 11,
-            TextColor3 = THEME.sub, Parent = b,
-        })
-        buttons[value], labels[value] = b, lbl
-        Maid.conn(b.MouseButton1Click:Connect(function()
-            CONFIG[key] = value
-            refresh()
-            if callback then spawnTask(function() pcall(callback, value) end) end
-        end))
-    end
-    refresh()
-    return holder
-end
-
 local function slider(parent, text, key, minVal, maxVal, suffix, onChange)
     local holder = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, Parent = parent,
@@ -1839,39 +1885,110 @@ local function clearChildren(scroll)
     end
 end
 
--- petite etiquette coloree (mutation, rarete)
-local function tag(parent, text, color)
-    local holder = corner(mk("Frame", {
-        Size = UDim2.new(0, math.max(38, #text * 7 + 14), 0, 18),
-        BackgroundColor3 = color, BackgroundTransparency = 0.78,
-        BorderSizePixel = 0, Parent = parent,
-    }), 9)
-    stroke(holder, color, 1, 0.55)
-    mk("TextLabel", {
-        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, Text = text, TextSize = 10, TextColor3 = color,
-        Parent = holder,
-    })
-    return holder
+-- police des messages, choisie dans les Reglages
+local function chatFont()
+    local ok, f = pcall(function() return Enum.Font[CONFIG.ChatFont] end)
+    if ok and f then return f end
+    return Enum.Font.GothamBold
 end
 
-local function cycleButton(parent, prefix, values, key, width, fmt, onChange)
-    fmt = fmt or tostring
-    local index = 1
-    for i, v in ipairs(values) do
-        if v == CONFIG[key] then index = i break end
-    end
-    local b
-    b = btn(parent, {
-        text = prefix .. " " .. fmt(CONFIG[key]), width = width, style = "ghost",
-        callback = function()
-            index = index % #values + 1
-            CONFIG[key] = values[index]
-            b.Text = prefix .. " " .. fmt(CONFIG[key])
-            if onChange then onChange(CONFIG[key]) end
-        end,
+-- Liste deroulante avec une coche sur la valeur choisie. L'entete se replie,
+-- la liste defile : de quoi tenir 24 langues sans manger la fenetre.
+local function listPicker(parent, title, values, key, labelFn, onPick)
+    labelFn = labelFn or tostring
+    local holder = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Parent = parent,
     })
-    return b
+    listLayout(holder, 6)
+
+    local head = corner(mk("TextButton", {
+        Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = THEME.surface,
+        AutoButtonColor = false, Text = "", BorderSizePixel = 0, Parent = holder,
+    }), 8)
+    stroke(head, THEME.line, 1, 0.3)
+    mk("TextLabel", {
+        Size = UDim2.new(0.55, -12, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = title,
+        TextSize = 11, TextColor3 = THEME.sub,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
+    })
+    local current = mk("TextLabel", {
+        Size = UDim2.new(0.45, -34, 1, 0), Position = UDim2.new(0.55, 0, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = labelFn(CONFIG[key]), TextSize = 12, TextColor3 = THEME.accent2,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
+    })
+    local arrow = mk("TextLabel", {
+        Size = UDim2.new(0, 22, 1, 0), Position = UDim2.new(1, -24, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "+",
+        TextSize = 13, TextColor3 = THEME.sub, Parent = head,
+    })
+
+    local listHolder = corner(mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 152), BackgroundColor3 = THEME.bg,
+        BorderSizePixel = 0, Visible = false, Parent = holder,
+    }), 8)
+    stroke(listHolder, THEME.line, 1, 0.4)
+    local scroll = mk("ScrollingFrame", {
+        Size = UDim2.new(1, -8, 1, -8), Position = UDim2.new(0, 4, 0, 4),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+        ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(), Parent = listHolder,
+    })
+    local layout = listLayout(scroll, 3)
+    Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 6)
+    end))
+
+    local rows = {}
+    local function refresh()
+        current.Text = labelFn(CONFIG[key])
+        for value, r in pairs(rows) do
+            local on = (CONFIG[key] == value)
+            r.check.Text = on and "X" or ""
+            tween(r.box, { BackgroundColor3 = on and THEME.accent or THEME.surface }, 0.12)
+            tween(r.label, { TextColor3 = on and THEME.text or THEME.sub }, 0.12)
+        end
+    end
+
+    for _, value in ipairs(values) do
+        local b = corner(mk("TextButton", {
+            Size = UDim2.new(1, -4, 0, 26), BackgroundColor3 = THEME.card,
+            AutoButtonColor = false, Text = "", BorderSizePixel = 0, Parent = scroll,
+        }), 6)
+        local box = corner(mk("Frame", {
+            Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(0, 8, 0.5, -8),
+            BackgroundColor3 = THEME.surface, BorderSizePixel = 0, Parent = b,
+        }), 4)
+        stroke(box, THEME.line, 1, 0.4)
+        local check = mk("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold, Text = "", TextSize = 11,
+            TextColor3 = THEME.bg, Parent = box,
+        })
+        local lbl = mk("TextLabel", {
+            Size = UDim2.new(1, -36, 1, 0), Position = UDim2.new(0, 32, 0, 0),
+            BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+            Text = labelFn(value), TextSize = 11, TextColor3 = THEME.sub,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = b,
+        })
+        rows[value] = { box = box, check = check, label = lbl }
+        Maid.conn(b.MouseButton1Click:Connect(function()
+            CONFIG[key] = value
+            refresh()
+            if onPick then spawnTask(function() pcall(onPick, value) end) end
+        end))
+    end
+    refresh()
+
+    Maid.conn(head.MouseButton1Click:Connect(function()
+        listHolder.Visible = not listHolder.Visible
+        arrow.Text = listHolder.Visible and "-" or "+"
+    end))
+    return holder, refresh
 end
 
 local scanBase, refreshPlayers
@@ -2053,17 +2170,19 @@ end
 ----------------------------------------------------------------------------------
 local pageChat = addTab("Chat")
 
-local cardTrad = card(pageChat, "Traducteur",
-    "la langue de l'autre est detectee toute seule")
 local refreshLangNote
 
-local rowLangs = rowOf(cardTrad)
-cycleButton(rowLangs, "Je lis :", LANGS, "TranslateTo", 168, langName)
-cycleButton(rowLangs, "Repli :", LANGS, "SendAs", 168, langName, function()
+local cardLang = card(pageChat, "Langues",
+    "coche ta langue : tout ce que tu lis arrive dedans")
+listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function()
+    refreshLangNote()
+    if UI.redrawChat then UI.redrawChat() end
+end)
+listPicker(cardLang, "Repli si rien n'est detecte", LANGS, "SendAs", langName, function()
     refreshLangNote()
 end)
 
-local detectNote = note(cardTrad, "langue detectee : en attente d'un message", THEME.accent2)
+local detectNote = note(cardLang, "langue detectee : en attente d'un message", THEME.accent2)
 
 refreshLangNote = function()
     local lang, fromDetection = Chat.replyLang()
@@ -2088,24 +2207,12 @@ end
 
 refreshLangNote()
 
-switch(cardTrad, "Traduire les messages recus", "TranslateIncoming")
-
-local chatDiag = note(cardTrad, "cadre de chat : pas encore scanne", THEME.sub)
-btn(cardTrad, { text = "Rescanner le chat du jeu", callback = function()
-    local n, where, exact = Chat.rescan()
-    chatDiag.Text = (exact and "cadre trouve : " or "detection par mot-cle : ")
-        .. tostring(where) .. "   -   " .. tostring(n) .. " element(s) de texte"
-    setStatus(n > 0 and (n .. " element(s) de chat trouve(s), traduction relancee")
-        or "aucun chat trouve - ouvre le Trade Chat dans le jeu puis reclique",
-        n > 0 and THEME.good or THEME.warn)
-end })
-
 local cardConv = card(pageChat, "Conversation",
-    "tape dans ta langue : le hub traduit et ecrit dans le chat du jeu")
-local chatPanel = panel(cardConv, 150)
+    "vide au demarrage, elle se remplit a mesure que vous parlez")
+local chatPanel = panel(cardConv, 178)
 
 local sendReply
-local chatField = field(cardConv, "type in your language...   (Entree pour envoyer)",
+local chatField = field(cardConv, "ecris dans ta langue...   (Entree pour envoyer)",
     function(text) if sendReply then sendReply(text) end end)
 local rowSend = rowOf(cardConv, 36)
 
@@ -2126,23 +2233,79 @@ sendReply = function(text)
     end
 end
 
-btn(rowSend, { text = "ECRIRE DANS LE CHAT", width = 214, height = 36, style = "primary",
+btn(rowSend, { text = "ENVOYER DANS LE CHAT", width = 214, height = 36, style = "primary",
     callback = function() sendReply(chatField.Text) end })
 btn(rowSend, { text = "Effacer", width = 104, height = 36, callback = function()
     chatField.Text = ""
+    State.ChatLog = {}
     clearChildren(chatPanel)
     setStatus("conversation effacee", THEME.sub)
 end })
 
--- une seule ligne par message, celle qui compte : la traduction. Le doublon
--- en gris avec le texte d'origine rendait la conversation illisible.
+local chatDiag = note(cardConv, "cadre de chat : pas encore scanne", THEME.sub)
+btn(cardConv, { text = "Rescanner le chat du jeu", callback = function()
+    local n, where, exact = Chat.rescan()
+    chatDiag.Text = (exact and "cadre trouve : " or "detection par mot-cle : ")
+        .. tostring(where) .. "   -   " .. tostring(n) .. " element(s) de texte"
+    setStatus(n > 0 and (n .. " element(s) de chat trouve(s), traduction relancee")
+        or "aucun chat trouve - ouvre le Trade Chat dans le jeu puis reclique",
+        n > 0 and THEME.good or THEME.warn)
+end })
+
+-- Une ligne = qui parle (tete + pseudo) et ce qu'il dit, rien d'autre.
+-- Pour tes propres messages on montre ce que TU as tape, pas la traduction
+-- partie chez l'autre.
+local function chatRow(scroll, entry)
+    local row = mk("Frame", {
+        Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Parent = scroll,
+    })
+    mk("UIPadding", { PaddingBottom = UDim.new(0, 8), Parent = row })
+
+    if entry.userId then
+        local head = avatar(row, entry.userId, 30)
+        head.Position = UDim2.new(0, 0, 0, 2)
+    else
+        local dot = corner(mk("Frame", {
+            Size = UDim2.new(0, 30, 0, 30), Position = UDim2.new(0, 0, 0, 2),
+            BackgroundColor3 = THEME.cardHi, BorderSizePixel = 0, Parent = row,
+        }), 15)
+        mk("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold, Text = "?", TextSize = 13,
+            TextColor3 = THEME.sub, Parent = dot,
+        })
+    end
+
+    local right = mk("Frame", {
+        Size = UDim2.new(1, -40, 0, 0), Position = UDim2.new(0, 40, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = row,
+    })
+    listLayout(right, 1)
+
+    mk("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold, Text = entry.who or "joueur", TextSize = 11,
+        TextColor3 = entry.mine and THEME.accent or THEME.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = right,
+    })
+    mk("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Font = chatFont(),
+        Text = entry.mine and entry.original or (entry.translated or entry.original),
+        TextSize = 15, TextColor3 = THEME.msg, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = right,
+    })
+    return row
+end
+
 function UI.pushChat(entry)
-    local shown = entry.translated or entry.original
+    local shown = entry.mine and entry.original or (entry.translated or entry.original)
     if not shown or shown == "" then return end
-    textLine(chatPanel, string.format("[%s]  %s", entry.at, shown),
-        THEME.accent2, Enum.Font.GothamMedium)
+    chatRow(chatPanel, entry)
     local children = chatPanel:GetChildren()
-    if #children > 120 then
+    if #children > 80 then
         for i = 1, 20 do
             local c = children[i]
             if c and not c:IsA("UIListLayout") then c:Destroy() end
@@ -2150,10 +2313,22 @@ function UI.pushChat(entry)
     end
 end
 
+-- redessine toute la conversation (changement de police ou de langue)
+function UI.redrawChat()
+    clearChildren(chatPanel)
+    for _, e in ipairs(State.ChatLog) do pcall(chatRow, chatPanel, e) end
+end
+
 ----------------------------------------------------------------------------------
 -- ONGLET : REGLAGES
 ----------------------------------------------------------------------------------
 local pageSettings = addTab("Reglages")
+
+local cardStyle = card(pageSettings, "Style du chat",
+    "police des messages de la conversation")
+listPicker(cardStyle, "Police", CHAT_FONTS, "ChatFont", tostring, function()
+    if UI.redrawChat then UI.redrawChat() end
+end)
 
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
