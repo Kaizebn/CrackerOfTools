@@ -42,6 +42,7 @@ local RunService        = game:GetService("RunService")
 local TweenService      = game:GetService("TweenService")
 local StarterGui        = game:GetService("StarterGui")
 local HttpService       = game:GetService("HttpService")
+local TextService       = game:GetService("TextService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -735,6 +736,16 @@ local PHRASEBOOK = {
 }
 Translator.phrases = PHRASEBOOK
 
+-- Un service peut repondre 200 avec un message d'erreur en guise de
+-- traduction. On ne laisse pas passer ca dans le chat.
+local function looksBogus(out)
+    local l = Util.lower(out)
+    return string.find(l, "please select two distinct", 1, true) ~= nil
+        or string.find(l, "invalid language pair", 1, true) ~= nil
+        or string.find(l, "query length limit", 1, true) ~= nil
+        or string.find(l, "mymemory warning", 1, true) ~= nil
+end
+
 local function decode(body)
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
     if ok then return data end
@@ -791,23 +802,41 @@ function Translator.providers(text, target, source)
             end,
         },
         {
-            name = "mymemory",
-            url = "https://api.mymemory.translated.net/get?q=" .. q .. "&langpair="
-                .. ((sl ~= "auto") and sl or "en") .. "%7C" .. tl,
+            -- Troisieme endpoint Google, chemin different des deux premiers :
+            -- il repond souvent quand les autres sont limites.
+            -- MyMemory a ete retire : c'est une MEMOIRE de traduction, elle
+            -- renvoie des phrases deja soumises par des humains. "How are you
+            -- today" en ressortait en "je m'appelle Shane", et un langpair
+            -- en|en donnait "PLEASE SELECT TWO DISTINCT LANGUAGES".
+            name = "google-dict",
+            url = "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl="
+                .. sl .. "&tl=" .. tl .. "&q=" .. q,
             parse = function(body)
                 local data = decode(body)
-                if type(data) ~= "table" or type(data.responseData) ~= "table" then return nil end
-                local out = data.responseData.translatedText
-                if type(out) ~= "string" or out == "" then return nil end
-                -- ce fournisseur ne detecte pas la langue : "?" et pas son nom,
-                -- sinon l'indicateur affichait "mymemory" comme langue
-                return out, "?"
+                if type(data) == "table" then
+                    if type(data[1]) == "string" then return data[1], "?" end
+                    if type(data[1]) == "table" then
+                        local first = data[1]
+                        if type(first[1]) == "string" then
+                            return first[1],
+                                (type(first[2]) == "string" and first[2]) or "?"
+                        end
+                    end
+                end
+                local m = string.match(body, '^%[%s*"(.-)"')
+                if m then return m, "?" end
+                return nil
             end,
         },
     }
 end
 
 function Translator.raw(text, target, source)
+    -- source connue et identique a la cible : aucun appel reseau, et surtout
+    -- pas de langpair du type "en|en" que certains services refusent
+    if source and source ~= "" and source ~= "auto" and source == target then
+        return text, source
+    end
     local key = tostring(target) .. "|" .. text
     local hit = Translator.cache[key]
     -- le cache garde aussi la langue detectee, sinon elle etait perdue des le
@@ -825,9 +854,13 @@ function Translator.raw(text, target, source)
         local body, code = Util.httpGet(provider.url)
         if body then
             local okParse, out, detected = pcall(provider.parse, body)
-            if okParse and out and out ~= "" then
+            if okParse and out and out ~= "" and not looksBogus(out) then
                 Translator.cache[key] = { out = out, src = detected or "?" }
                 return out, detected or "?"
+            end
+            if okParse and out and looksBogus(out) then
+                log("traduction %s rejetee (message de service) : %s",
+                    provider.name, string.sub(out, 1, 60))
             end
             lastErr = provider.name .. " : reponse illisible"
             log("traduction %s illisible : %s", provider.name,
@@ -869,7 +902,17 @@ local Chat = { remote = nil, rootInst = nil, seen = {}, written = {},
                boxes = {}, listened = {} }
 
 -- entry = { who, userId, original, translated, mine }
+-- Un meme message peut arriver deux fois : une par le remote de chat, une par
+-- le label du jeu. On ignore le doublon s'il tombe dans les 4 secondes.
+local recentChat = {}
+
 local function pushChat(entry)
+    local key = tostring(entry.original or entry.translated or "")
+    local now = Util.clock()
+    if key ~= "" then
+        if recentChat[key] and (now - recentChat[key]) < 4 then return end
+        recentChat[key] = now
+    end
     entry.at = os.date("%H:%M")
     table.insert(State.ChatLog, entry)
     if #State.ChatLog > 120 then table.remove(State.ChatLog, 1) end
@@ -906,10 +949,11 @@ local function senderOf(obj)
         if ok then
             for _, d in ipairs(list) do
                 if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                    -- l'UserId apparait sous plusieurs formes selon le jeu :
+                    -- rbxthumb://type=AvatarHeadShot&id=123, ?userId=123, ...
+                    -- on prend toute suite de 6 chiffres ou plus et on compare
                     local img = tostring(d.Image or "")
-                    local id = string.match(img, "userId=(%d+)")
-                        or string.match(img, "[%?&]id=(%d+)")
-                    if id then
+                    for id in string.gmatch(img, "(%d%d%d%d%d%d+)") do
                         for _, plr in ipairs(Players:GetPlayers()) do
                             if tostring(plr.UserId) == id then return plr end
                         end
@@ -2252,15 +2296,40 @@ btn(cardConv, { text = "Rescanner le chat du jeu", callback = function()
         n > 0 and THEME.good or THEME.warn)
 end })
 
+-- Hauteur d'un texte enroule sur une largeur donnee. On mesure au lieu de
+-- laisser AutomaticSize se debrouiller : imbrique dans un ScrollingFrame,
+-- il rendait des lignes de hauteur nulle, donc invisibles.
+local function textHeight(text, font, size, width)
+    local ok, v = pcall(function()
+        return TextService:GetTextSize(text, size, font, Vector2.new(width, 100000))
+    end)
+    if ok and v and v.Y > 0 then return math.ceil(v.Y) end
+    local perLine = math.max(12, math.floor(width / (size * 0.55)))
+    return math.max(1, math.ceil(#text / perLine)) * (size + 3)
+end
+
+local function chatWidth()
+    local w = chatPanel.AbsoluteSize.X
+    if w and w > 90 then return w end
+    return 384
+end
+
 -- Une ligne = qui parle (tete + pseudo) et ce qu'il dit, rien d'autre.
 -- Pour tes propres messages on montre ce que TU as tape, pas la traduction
 -- partie chez l'autre.
 local function chatRow(scroll, entry)
+    local body = tostring(entry.mine and entry.original
+        or (entry.translated or entry.original) or "")
+    if body == "" then return end
+
+    local font  = chatFont()
+    local textW = math.max(120, chatWidth() - 58)
+    local msgH  = textHeight(body, font, 15, textW) + 4
+    local rowH  = math.max(34, 17 + msgH) + 8
+
     local row = mk("Frame", {
-        Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1, Parent = scroll,
+        Size = UDim2.new(1, -6, 0, rowH), BackgroundTransparency = 1, Parent = scroll,
     })
-    mk("UIPadding", { PaddingBottom = UDim.new(0, 8), Parent = row })
 
     if entry.userId then
         local head = avatar(row, entry.userId, 30)
@@ -2277,32 +2346,25 @@ local function chatRow(scroll, entry)
         })
     end
 
-    local right = mk("Frame", {
-        Size = UDim2.new(1, -40, 0, 0), Position = UDim2.new(0, 40, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = row,
-    })
-    listLayout(right, 1)
-
     mk("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, Text = entry.who or "joueur", TextSize = 11,
+        Size = UDim2.new(1, -46, 0, 15), Position = UDim2.new(0, 40, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = entry.who or "joueur", TextSize = 11,
         TextColor3 = entry.mine and THEME.accent or THEME.text,
         TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd, Parent = right,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1, Font = chatFont(),
-        Text = entry.mine and entry.original or (entry.translated or entry.original),
-        TextSize = 15, TextColor3 = THEME.msg, TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = right,
+        Size = UDim2.new(1, -46, 0, msgH), Position = UDim2.new(0, 40, 0, 17),
+        BackgroundTransparency = 1, Font = font, Text = body, TextSize = 15,
+        TextColor3 = THEME.msg, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, Parent = row,
     })
     return row
 end
 
 function UI.pushChat(entry)
-    local shown = entry.mine and entry.original or (entry.translated or entry.original)
-    if not shown or shown == "" then return end
     chatRow(chatPanel, entry)
     local children = chatPanel:GetChildren()
     if #children > 80 then
@@ -2313,10 +2375,23 @@ function UI.pushChat(entry)
     end
 end
 
--- redessine toute la conversation (changement de police ou de langue)
+-- redessine toute la conversation (police, langue, largeur du panneau)
 function UI.redrawChat()
     clearChildren(chatPanel)
     for _, e in ipairs(State.ChatLog) do pcall(chatRow, chatPanel, e) end
+end
+
+-- au premier affichage le panneau n'a pas encore sa largeur reelle : on
+-- redessine une fois qu'il l'a, pour que les hauteurs mesurees soient justes
+do
+    local lastWidth = 0
+    Maid.conn(chatPanel:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        local w = chatPanel.AbsoluteSize.X
+        if math.abs(w - lastWidth) > 8 then
+            lastWidth = w
+            if UI.redrawChat then pcall(UI.redrawChat) end
+        end
+    end))
 end
 
 ----------------------------------------------------------------------------------
