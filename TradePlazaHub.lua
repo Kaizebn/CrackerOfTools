@@ -91,6 +91,21 @@ local LANGS = {
     "id","ms","vi","th","fil","ja","ko","zh-CN","hi","ro","sv",
 }
 
+local LANG_NAMES = {
+    fr = "Francais", en = "English", es = "Espanol", pt = "Portugues",
+    ["pt-BR"] = "Portugues BR", de = "Deutsch", it = "Italiano",
+    nl = "Nederlands", pl = "Polski", tr = "Turkce", ru = "Russe",
+    uk = "Ukrainien", ar = "Arabe", id = "Indonesien", ms = "Malais",
+    vi = "Vietnamien", th = "Thai", fil = "Filipino", ja = "Japonais",
+    ko = "Coreen", ["zh-CN"] = "Chinois", hi = "Hindi", ro = "Roumain",
+    sv = "Suedois", auto = "auto-detect",
+}
+
+local function langName(code)
+    code = tostring(code or "")
+    return LANG_NAMES[code] or (code ~= "" and code or "auto-detect")
+end
+
 ----------------------------------------------------------------------------------
 -- ENVIRONNEMENT
 ----------------------------------------------------------------------------------
@@ -833,12 +848,34 @@ function Chat.getRemote()
     return Chat.remote
 end
 
--- Le hub n'envoie plus rien : il traduit et met le resultat dans le
--- presse-papier. C'est toi qui colles dans le vrai chat du jeu, donc le
--- message part par le chemin normal du client et le serveur ne voit rien
--- d'anormal.
--- retourne : ok, texte final, copie dans le presse-papier ?
-function Chat.prepare(text, translateTo)
+-- La zone de saisie du chat du jeu ("Type Here..."), cherchee dans le cadre
+-- de chat. On prend celle dont le placeholder ou le nom ressemble a une
+-- entree de texte, sinon la premiere TextBox trouvee.
+function Chat.inputBox()
+    local root = Chat.root()
+    if not root then return nil end
+    local ok, list = pcall(function() return root:GetDescendants() end)
+    if not ok then return nil end
+    local fallback
+    for _, d in ipairs(list) do
+        if d:IsA("TextBox") then
+            local ph = Util.lower(tostring(d.PlaceholderText or ""))
+            local nm = Util.lower(d.Name)
+            if string.find(ph, "type", 1, true) or string.find(ph, "here", 1, true)
+            or string.find(nm, "input", 1, true) or string.find(nm, "box", 1, true) then
+                return d
+            end
+            fallback = fallback or d
+        end
+    end
+    return fallback
+end
+
+-- Traduit ton texte vers la langue choisie et l'ECRIT dans la zone de saisie
+-- du chat du jeu. C'est une ecriture locale sur une TextBox : aucun remote
+-- n'est appele, c'est toi qui appuies sur Entree pour envoyer.
+-- retourne : ok, texte final, ecrit dans le jeu ?, copie dans le presse-papier ?
+function Chat.compose(text, translateTo)
     text = Util.trim(text or "")
     if text == "" then return false, "message vide" end
 
@@ -849,13 +886,22 @@ function Chat.prepare(text, translateTo)
             final = out
         else
             -- on garde quand meme une trace de ce que tu voulais dire
-            pushChat("a coller (non traduit)", text, nil)
+            pushChat("a envoyer (non traduit)", text, nil)
             return false, "traduction impossible (" .. tostring(info) .. ")"
         end
     end
 
-    pushChat("a coller", text, (final ~= text) and final or nil)
-    return true, final, Util.copy(final)
+    local box, written = Chat.inputBox(), false
+    if box then
+        -- focus d'abord : si la TextBox a ClearTextOnFocus, elle se vide
+        -- avant qu'on ecrive et pas apres
+        pcall(function() box:CaptureFocus() end)
+        written = pcall(function() box.Text = final end)
+        pcall(function() box.CursorPosition = #final + 1 end)
+    end
+
+    pushChat("a envoyer", text, (final ~= text) and final or nil)
+    return true, final, written, Util.copy(final)
 end
 
 local function extractMessage(...)
@@ -994,6 +1040,7 @@ local function handleText(obj)
         -- Avant, un message que le traducteur refusait disparaissait
         -- completement : c'est pour ca que "Oui" ne s'affichait nulle part.
         if out then
+            if UI and UI.setDetected then pcall(UI.setDetected, detected) end
             pushChat("chat/" .. tostring(detected), original,
                 (out ~= original) and out or nil)
         else
@@ -1731,18 +1778,19 @@ local function tag(parent, text, color)
     return holder
 end
 
-local function cycleButton(parent, prefix, values, key, width)
+local function cycleButton(parent, prefix, values, key, width, fmt)
+    fmt = fmt or tostring
     local index = 1
     for i, v in ipairs(values) do
         if v == CONFIG[key] then index = i break end
     end
     local b
     b = btn(parent, {
-        text = prefix .. " " .. tostring(CONFIG[key]), width = width, style = "ghost",
+        text = prefix .. " " .. fmt(CONFIG[key]), width = width, style = "ghost",
         callback = function()
             index = index % #values + 1
             CONFIG[key] = values[index]
-            b.Text = prefix .. " " .. tostring(CONFIG[key])
+            b.Text = prefix .. " " .. fmt(CONFIG[key])
         end,
     })
     return b
@@ -1751,17 +1799,30 @@ end
 local scanBase, refreshPlayers
 
 ----------------------------------------------------------------------------------
--- ONGLET : JOUEURS
+-- ONGLET : JOUEURS  (la liste, et la base du joueur choisi juste en dessous)
 ----------------------------------------------------------------------------------
 local pagePlayers = addTab("Joueurs")
 
 local cardList = card(pagePlayers, "Joueurs du serveur",
-    "qui est la, avec sa tete et son UserId")
-local playersPanel = panel(cardList, 300)
+    "VOIR LA BASE affiche ses brainrots juste en dessous")
+local playersPanel = panel(cardList, 186)
 btn(cardList, { text = "Rafraichir", callback = function()
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
 end })
+
+local cardBase = card(pagePlayers, "Base")
+local baseSummary = note(cardBase, "aucune base affichee", THEME.text)
+local rowBase = rowOf(cardBase)
+btn(rowBase, { text = "Ma base", width = 110, style = "primary",
+    callback = function() scanBase(LocalPlayer) end })
+btn(rowBase, { text = "Copier la structure", width = 160, callback = function()
+    if not State.Plot then setStatus("affiche d'abord une base", THEME.bad) return end
+    local dump = Inspector.dump(State.Plot, 400)
+    if Util.copy(dump) then setStatus("structure copiee", THEME.good)
+    else print(dump) setStatus("presse-papier indispo -> console F9", THEME.warn) end
+end })
+local brainrotPanel = panel(cardBase, 320)
 
 local function playerRow(scroll, plr)
     local row = corner(mk("Frame", {
@@ -1774,20 +1835,23 @@ local function playerRow(scroll, plr)
     head.Position = UDim2.new(0, 8, 0.5, -17)
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -60, 0, 15), Position = UDim2.new(0, 50, 0, 8),
+        Size = UDim2.new(1, -190, 0, 15), Position = UDim2.new(0, 50, 0, 8),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = plr.DisplayName ~= "" and plr.DisplayName or plr.Name, TextSize = 12,
         TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, -60, 0, 13), Position = UDim2.new(0, 50, 0, 25),
+        Size = UDim2.new(1, -190, 0, 13), Position = UDim2.new(0, 50, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
         Text = "@" .. plr.Name .. "   -   " .. plr.UserId, TextSize = 10,
         TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
+    local see = btn(row, { text = "VOIR LA BASE", width = 126, height = 30,
+        style = "primary", callback = function() scanBase(plr) end })
+    see.Position = UDim2.new(1, -134, 0.5, -15)
     return row
 end
 
@@ -1804,27 +1868,6 @@ refreshPlayers = function()
         textLine(playersPanel, "aucun autre joueur dans le serveur", THEME.sub, Enum.Font.Gotham)
     end
 end
-
-----------------------------------------------------------------------------------
--- ONGLET : BASE
-----------------------------------------------------------------------------------
-local pageBase = addTab("Base")
-
-local cardScan = card(pageBase, "Base affichee",
-    "scanne ta propre base et lis ce qu'elle contient")
-local rowScan = rowOf(cardScan)
-btn(rowScan, { text = "Ma base", width = 110, style = "primary",
-    callback = function() scanBase(LocalPlayer) end })
-btn(rowScan, { text = "Copier la structure", width = 160, callback = function()
-    if not State.Plot then setStatus("scanne d'abord une base", THEME.bad) return end
-    local dump = Inspector.dump(State.Plot, 400)
-    if Util.copy(dump) then setStatus("structure copiee", THEME.good)
-    else print(dump) setStatus("presse-papier indispo -> console F9", THEME.warn) end
-end })
-local baseSummary = note(cardScan, "aucune base scannee", THEME.text)
-
-local cardBrainrots = card(pageBase, "Brainrots")
-local brainrotPanel = panel(cardBrainrots, 300)
 
 -- une ligne = une grande vignette 3D a gauche, les infos empilees a droite
 local function brainrotRow(scroll, entry)
@@ -1885,11 +1928,11 @@ scanBase = function(player, model, ownerName)
         return
     end
     State.Plot, State.PlotOwner = plot, ownerName
-    UI.select("Base")
     clearChildren(brainrotPanel)
 
     local list, total, count = Inspector.brainrots(plot)
-    baseSummary.Text = string.format("Base de %s   -   %d brainrots   -   %d types   -   revenu total $%s/s",
+    baseSummary.Text = string.format(
+        "Base de %s   -   %d brainrots   -   %d types   -   revenu total $%s/s",
         ownerName, count, #list, Util.short(total))
 
     if #list == 0 then
@@ -1902,7 +1945,7 @@ scanBase = function(player, model, ownerName)
             brainrotRow(brainrotPanel, entry)
         end
     end
-    setStatus("base de " .. ownerName .. " scannee : " .. count .. " brainrots", THEME.good)
+    setStatus("base de " .. ownerName .. " : " .. count .. " brainrots", THEME.good)
 end
 
 -- re-affiche la base courante (apres un changement de taille de vignette)
@@ -1915,12 +1958,25 @@ end
 ----------------------------------------------------------------------------------
 local pageChat = addTab("Chat")
 
-local cardTrad = card(pageChat, "Traducteur")
+local cardTrad = card(pageChat, "Traducteur",
+    "la langue de l'autre est detectee toute seule")
 local rowLangs = rowOf(cardTrad)
-cycleButton(rowLangs, "Je lis en :", LANGS, "TranslateTo", 168)
-cycleButton(rowLangs, "J'ecris en :", LANGS, "SendAs", 168)
+cycleButton(rowLangs, "Je lis :", LANGS, "TranslateTo", 168, langName)
+cycleButton(rowLangs, "J'ecris :", LANGS, "SendAs", 168, langName)
+
+local detectNote = note(cardTrad, "langue detectee : auto-detect", THEME.accent2)
+
+-- appele par le traducteur des qu'un fournisseur nous rend la langue source
+function UI.setDetected(code)
+    local c = Util.trim(tostring(code or ""))
+    if c == "" or c == "?" or c == "cache" or c == "hors-ligne" then return end
+    State.LastDetected = c
+    detectNote.Text = "langue detectee : " .. langName(c) .. "   (" .. c .. ")"
+end
+
 switch(cardTrad, "Traduire les messages recus", "TranslateIncoming")
 switch(cardTrad, "Garder le texte original a cote", "ShowOriginal")
+
 local chatDiag = note(cardTrad, "cadre de chat : pas encore scanne", THEME.sub)
 btn(cardTrad, { text = "Rescanner le chat du jeu", callback = function()
     local n, where, exact = Chat.rescan()
@@ -1930,40 +1986,31 @@ btn(cardTrad, { text = "Rescanner le chat du jeu", callback = function()
         or "aucun chat trouve - ouvre le Trade Chat dans le jeu puis reclique",
         n > 0 and THEME.good or THEME.warn)
 end })
-note(cardTrad, "Le hub lit le Trade Chat du jeu et traduit chaque message sur place. Ce que tu tapes toi-meme apparait aussi ci-dessous des que tu valides. Si rien ne se traduit : ouvre le Trade Chat, puis clique sur Rescanner.", THEME.sub)
 
 local cardConv = card(pageChat, "Conversation",
-    "le hub traduit et copie : c'est toi qui colles dans le chat du jeu")
-local chatPanel = panel(cardConv, 170)
-local chatField = field(cardConv, "ton message en francais...")
-local rowSend = rowOf(cardConv)
+    "tape dans ta langue : le hub traduit et ecrit dans le chat du jeu")
+local chatPanel = panel(cardConv, 150)
+local chatField = field(cardConv, "type in your language...")
+local rowSend = rowOf(cardConv, 36)
 
-local function prepareAndReport(text, lang)
-    local ok, msg, copied = Chat.prepare(text, lang)
-    if not ok then setStatus(tostring(msg), THEME.bad) return end
-    if copied then
-        setStatus("copie, colle-le dans le chat : " .. tostring(msg), THEME.good)
-    else
-        setStatus("presse-papier indispo - " .. tostring(msg), THEME.warn)
-    end
-end
-
-btn(rowSend, { text = "Traduire et copier", width = 190, style = "primary", callback = function()
-    prepareAndReport(chatField.Text, CONFIG.SendAs)
+btn(rowSend, { text = "ECRIRE DANS LE CHAT", width = 214, height = 36, style = "primary",
+    callback = function()
+        local ok, msg, written, copied = Chat.compose(chatField.Text, CONFIG.SendAs)
+        if not ok then setStatus(tostring(msg), THEME.bad) return end
+        chatField.Text = ""
+        if written then
+            setStatus("ecrit dans le chat, appuie sur Entree : " .. tostring(msg), THEME.good)
+        elseif copied then
+            setStatus("zone de saisie introuvable - copie : " .. tostring(msg), THEME.warn)
+        else
+            setStatus("traduit : " .. tostring(msg), THEME.warn)
+        end
+    end })
+btn(rowSend, { text = "Effacer", width = 104, height = 36, callback = function()
+    chatField.Text = ""
+    clearChildren(chatPanel)
+    setStatus("conversation effacee", THEME.sub)
 end })
-btn(rowSend, { text = "Copier brut", width = 130, callback = function()
-    prepareAndReport(chatField.Text, nil)
-end })
-
-local cardPhrases = card(pageChat, "Phrases rapides")
-for i = 1, #Translator.phrases, 2 do
-    local row = rowOf(cardPhrases, 30)
-    for j = i, math.min(i + 1, #Translator.phrases) do
-        local phrase = Translator.phrases[j]
-        btn(row, { text = phrase.fr, width = 228, height = 30, textSize = 11,
-            callback = function() prepareAndReport(phrase.fr, CONFIG.SendAs) end })
-    end
-end
 
 function UI.pushChat(entry)
     textLine(chatPanel, string.format("[%s] %s : %s", entry.at, entry.who, entry.original),
@@ -1985,12 +2032,6 @@ end
 ----------------------------------------------------------------------------------
 local pageSettings = addTab("Reglages")
 
-local cardMode = card(pageSettings, "Mode lecture seule",
-    "ce que ce hub ne fait pas, et pourquoi")
-note(cardMode, "Aucun FireServer / InvokeServer, aucun deplacement du personnage, aucun hook : le serveur ne recoit rien de ce hub, donc il n'a rien a te reprocher.", THEME.good)
-note(cardMode, "Le vol et le teleport ont ete retires parce qu'ils etaient la cause du kick : le serveur compare ta position d'une frame a l'autre avec ta WalkSpeed. BodyVelocity ou CFrame, la trajectoire reste impossible. Il n'existe pas de version discrete de ca.", THEME.warn)
-note(cardMode, "L'envoi de trade a ete retire pour la meme raison : un remote appele avec des arguments devines fait kick des le premier appel.", THEME.warn)
-
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
@@ -1998,34 +2039,6 @@ slider(cardDisplay, "Taille de l'apercu 3D", "ModelSize", 48, 220, " px", functi
     redrawBase()
 end)
 note(cardDisplay, "La taille s'applique au relachement du curseur : la base affichee est redessinee toute seule.", THEME.sub)
-
-local cardState = card(pageSettings, "Etat")
-local infoNote = note(cardState, "...", THEME.text)
-local rowState = rowOf(cardState)
-btn(rowState, { text = "Recharger les modules", width = 190, callback = function()
-    Remotes.cache, Chat.remote = {}, nil
-    Chat.getRemote()
-    Chat.hookIncoming()
-    refreshPlayers()
-    setStatus("modules recharges", THEME.good)
-end })
-btn(rowState, { text = "Fermer le hub", width = 150, style = "danger", callback = function()
-    if GENV.TradePlazaHub and GENV.TradePlazaHub.Unload then GENV.TradePlazaHub.Unload() end
-end })
-
-local cardLogs = card(pageSettings, "Journal")
-local logsPanel = panel(cardLogs, 150)
-
-function UI.pushLog(msg)
-    textLine(logsPanel, msg, THEME.sub)
-    local children = logsPanel:GetChildren()
-    if #children > 140 then
-        for i = 1, 40 do
-            local c = children[i]
-            if c and not c:IsA("UIListLayout") then c:Destroy() end
-        end
-    end
-end
 
 ----------------------------------------------------------------------------------
 -- BOUTONS FENETRE / RACCOURCI / UNLOAD
@@ -2098,24 +2111,15 @@ local function init()
     local httpOk = Util.httpGet(
         "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=test") ~= nil
 
-    infoNote.Text = table.concat({
-        "Touche du menu       : " .. tostring(CONFIG.Keybind.Name),
-        "Mode                 : lecture seule (0 appel serveur, 0 deplacement)",
-        "Executor detecte     : " .. (Env.isExecutor and "oui" or "non"),
-        "Cadre de chat        : " .. (function()
-            local root, exact = Chat.root()
-            if not root then return "PlayerGui absent" end
-            return (exact and "" or "[mot-cle] ") .. root:GetFullName()
-        end)(),
-        "Remotes de chat      : " .. tostring(chatRemotes)
-            .. (chatRemotes > 0 and "  (abonne)" or "  (aucun)"),
-        "Traduction en ligne  : " .. (httpOk and "operationnelle" or "indispo (phrases hors-ligne seulement)"),
-        "Bases detectees      : " .. tostring(#Plots:All()),
-        "API console          : getgenv().TradePlazaHub",
-    }, "\n")
+    local root, exact = Chat.root()
+    log("chat : %s%s   |   %d remote(s) ecoute(s)   |   traduction en ligne : %s",
+        exact and "" or "[mot-cle] ",
+        root and root:GetFullName() or "PlayerGui absent",
+        chatRemotes, httpOk and "ok" or "indisponible")
 
-    setStatus("pret (lecture seule) - " .. tostring(CONFIG.Keybind.Name) .. " pour cacher", THEME.good)
-    notify("Trade Plaza Hub", "Charge en lecture seule. " .. tostring(CONFIG.Keybind.Name) .. " pour afficher/cacher.", 5)
+    setStatus(httpOk and ("pret - " .. tostring(CONFIG.Keybind.Name) .. " pour cacher")
+        or "pret, mais la traduction en ligne ne repond pas", httpOk and THEME.good or THEME.warn)
+    notify("Trade Plaza Hub", "Charge. " .. tostring(CONFIG.Keybind.Name) .. " pour afficher/cacher.", 5)
 end
 
 spawnTask(function()
