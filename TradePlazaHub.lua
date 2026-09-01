@@ -74,6 +74,11 @@ local CONFIG = {
     ShowModels   = true,
     ModelSize    = 110,         -- taille de l'apercu 3D des brainrots (px)
 
+    -- decor de la base pris a tort pour un brainrot : compare en minuscules,
+    -- en sous-chaine. Ajoute-en si le scanner ramene encore du mobilier.
+    IgnoreNames  = { "lock base", "base lock", "unlock", "lock", "locked",
+                     "buy plot", "buy base", "claim", "empty", "vide" },
+
     RemotePaths  = {},
 }
 
@@ -153,16 +158,27 @@ function Util.urlEncode(s)
     return (string.gsub(s, " ", "+"))
 end
 
+-- retourne : corps, code HTTP (nil si inconnu). Un 429 de Google renvoie une
+-- page HTML : on ne la prend pas pour du JSON, on passe au fournisseur suivant.
 function Util.httpGet(url)
     if Env.request then
         local ok, res = pcall(Env.request, { Url = url, Method = "GET" })
-        if ok and type(res) == "table" and res.Body then return res.Body end
+        if ok and type(res) == "table" and res.Body then
+            local code = tonumber(res.StatusCode or res.Status) or 200
+            if code >= 200 and code < 300 then return res.Body, code end
+            return nil, code
+        end
     end
     local ok2, body = pcall(function() return game:HttpGetAsync(url) end)
-    if ok2 and body then return body end
+    if ok2 and body then return body, nil end
     local ok3, body3 = pcall(function() return game:HttpGet(url) end)
-    if ok3 and body3 then return body3 end
-    return nil
+    if ok3 and body3 then return body3, nil end
+    return nil, nil
+end
+
+function Util.clock()
+    if os and os.clock then return os.clock() end
+    return tick()
 end
 
 function Util.copy(text)
@@ -569,6 +585,18 @@ local function isEntityModel(model)
     return false
 end
 
+-- "Lock Base", "Unlock", les panneaux d'achat : ce sont des elements de decor
+-- que isEntityModel prend pour des entites parce qu'ils ont un BillboardGui
+-- avec un prix. On les jette sur le nom.
+function Inspector.isIgnored(name)
+    local n = Util.lower(Util.trim(name or ""))
+    if n == "" then return true end
+    for _, word in ipairs(CONFIG.IgnoreNames or {}) do
+        if string.find(n, Util.lower(word), 1, true) then return true end
+    end
+    return false
+end
+
 -- retourne la liste groupee (avec le modele pour l'apercu 3D), le revenu total
 -- et le nombre d'unites
 function Inspector.brainrots(plot)
@@ -590,29 +618,32 @@ function Inspector.brainrots(plot)
         if not nested then table.insert(chosen, model) end
     end
 
-    local buckets, order, total = {}, {}, 0
+    local buckets, order, total, kept = {}, {}, 0, 0
     for _, model in ipairs(chosen) do
         local info = readEntity(model)
-        local key = Util.lower((info.name or "?") .. "|" .. (info.mutation or ""))
-        local b = buckets[key]
-        if not b then
-            b = { name = info.name or model.Name, mutation = info.mutation,
-                  rarity = info.rarity, income = info.income, count = 0,
-                  total = 0, model = model }
-            buckets[key] = b
-            table.insert(order, b)
+        if not Inspector.isIgnored(info.name) then
+            kept = kept + 1
+            local key = Util.lower((info.name or "?") .. "|" .. (info.mutation or ""))
+            local b = buckets[key]
+            if not b then
+                b = { name = info.name or model.Name, mutation = info.mutation,
+                      rarity = info.rarity, income = info.income, count = 0,
+                      total = 0, model = model }
+                buckets[key] = b
+                table.insert(order, b)
+            end
+            b.count = b.count + 1
+            if info.income > b.income then b.income = info.income end
+            b.total = b.total + info.income
+            total = total + info.income
         end
-        b.count = b.count + 1
-        if info.income > b.income then b.income = info.income end
-        b.total = b.total + info.income
-        total = total + info.income
     end
 
     table.sort(order, function(a, b)
         if a.total == b.total then return a.count > b.count end
         return a.total > b.total
     end)
-    return order, total, #chosen
+    return order, total, kept
 end
 
 function Inspector.dump(plot, maxLines)
@@ -641,7 +672,7 @@ end
 ----------------------------------------------------------------------------------
 -- TRADUCTEUR
 ----------------------------------------------------------------------------------
-local Translator = { cache = {} }
+local Translator = { cache = {}, pausedUntil = 0 }
 
 local PHRASEBOOK = {
     { fr = "salut, tu veux trade ?",  en = "hey, wanna trade?" },
@@ -659,27 +690,105 @@ local PHRASEBOOK = {
 }
 Translator.phrases = PHRASEBOOK
 
+local function decode(body)
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if ok then return data end
+    return nil
+end
+
+-- Trois fournisseurs essayes dans l'ordre. Google finit par renvoyer du 429
+-- (page HTML) quand on traduit beaucoup de messages a la suite : c'est ca qui
+-- donnait "reponse illisible". Les deux suivants prennent alors le relais.
+function Translator.providers(text, target, source)
+    local q  = Util.urlEncode(text)
+    local sl = (source and source ~= "") and source or "auto"
+    local tl = tostring(target)
+    return {
+        {
+            name = "google-gtx",
+            url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl="
+                .. sl .. "&tl=" .. tl .. "&dt=t&q=" .. q,
+            parse = function(body)
+                local data = decode(body)
+                if type(data) == "table" and type(data[1]) == "table" then
+                    local parts = {}
+                    for _, seg in ipairs(data[1]) do
+                        if type(seg) == "table" and type(seg[1]) == "string" then
+                            table.insert(parts, seg[1])
+                        end
+                    end
+                    if #parts > 0 then
+                        return table.concat(parts),
+                               (type(data[3]) == "string" and data[3]) or "?"
+                    end
+                end
+                -- repli sans JSON : la premiere chaine du tableau suffit
+                local first = string.match(body, '^%[%[%["(.-)"')
+                if first then return first, "?" end
+                return nil
+            end,
+        },
+        {
+            name = "google-dj",
+            url = "https://clients5.google.com/translate_a/single?dj=1&dt=t&sl="
+                .. sl .. "&tl=" .. tl .. "&q=" .. q,
+            parse = function(body)
+                local data = decode(body)
+                if type(data) ~= "table" or type(data.sentences) ~= "table" then return nil end
+                local parts = {}
+                for _, seg in ipairs(data.sentences) do
+                    if type(seg) == "table" and type(seg.trans) == "string" then
+                        table.insert(parts, seg.trans)
+                    end
+                end
+                if #parts == 0 then return nil end
+                return table.concat(parts), (type(data.src) == "string" and data.src) or "?"
+            end,
+        },
+        {
+            name = "mymemory",
+            url = "https://api.mymemory.translated.net/get?q=" .. q .. "&langpair="
+                .. ((sl ~= "auto") and sl or "en") .. "%7C" .. tl,
+            parse = function(body)
+                local data = decode(body)
+                if type(data) ~= "table" or type(data.responseData) ~= "table" then return nil end
+                local out = data.responseData.translatedText
+                if type(out) ~= "string" or out == "" then return nil end
+                return out, "mymemory"
+            end,
+        },
+    }
+end
+
 function Translator.raw(text, target, source)
     local key = tostring(target) .. "|" .. text
     if Translator.cache[key] then return Translator.cache[key], "cache" end
 
-    local url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl="
-        .. (source or "auto") .. "&tl=" .. tostring(target) .. "&dt=t&q=" .. Util.urlEncode(text)
-    local body = Util.httpGet(url)
-    if not body then return nil, "pas de fonction HTTP dans cet executor" end
+    -- si les trois fournisseurs viennent d'echouer, on ne relance pas trois
+    -- requetes par message pendant 30 s : on passe direct au phrasebook
+    if Util.clock() < Translator.pausedUntil then
+        return nil, "traduction en pause (echecs repetes)"
+    end
 
-    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok or type(data) ~= "table" or type(data[1]) ~= "table" then
-        return nil, "reponse illisible"
+    local lastErr = "aucun fournisseur n'a repondu"
+    for _, provider in ipairs(Translator.providers(text, target, source)) do
+        local body, code = Util.httpGet(provider.url)
+        if body then
+            local okParse, out, detected = pcall(provider.parse, body)
+            if okParse and out and out ~= "" then
+                Translator.cache[key] = out
+                return out, detected or "?"
+            end
+            lastErr = provider.name .. " : reponse illisible"
+            log("traduction %s illisible : %s", provider.name,
+                string.sub(tostring(body), 1, 120))
+        else
+            lastErr = provider.name .. " : HTTP " .. tostring(code or "pas de reponse")
+            log("traduction %s : %s", provider.name, lastErr)
+        end
     end
-    local parts = {}
-    for _, seg in ipairs(data[1]) do
-        if type(seg) == "table" and type(seg[1]) == "string" then table.insert(parts, seg[1]) end
-    end
-    local out = table.concat(parts)
-    if out == "" then return nil, "traduction vide" end
-    Translator.cache[key] = out
-    return out, (type(data[3]) == "string" and data[3] or "?")
+    Translator.pausedUntil = Util.clock() + 30
+    return nil, lastErr
 end
 
 local function phrasebookLookup(text, target)
@@ -736,8 +845,13 @@ function Chat.prepare(text, translateTo)
     local final = text
     if translateTo and translateTo ~= "" then
         local out, info = Translator.translate(text, translateTo)
-        if out then final = out
-        else return false, "traduction impossible (" .. tostring(info) .. ")" end
+        if out then
+            final = out
+        else
+            -- on garde quand meme une trace de ce que tu voulais dire
+            pushChat("a coller (non traduit)", text, nil)
+            return false, "traduction impossible (" .. tostring(info) .. ")"
+        end
     end
 
     pushChat("a coller", text, (final ~= text) and final or nil)
@@ -874,13 +988,21 @@ local function handleText(obj)
 
     spawnTask(function()
         local out, detected = Translator.translate(original, CONFIG.TranslateTo)
-        if State.Unloaded or not obj.Parent then return end
-        if not out then
-            log("traduction indisponible pour \"%s\"", original)
-            return
+        if State.Unloaded then return end
+
+        -- Le message apparait dans le hub MEME quand la traduction echoue.
+        -- Avant, un message que le traducteur refusait disparaissait
+        -- completement : c'est pour ca que "Oui" ne s'affichait nulle part.
+        if out then
+            pushChat("chat/" .. tostring(detected), original,
+                (out ~= original) and out or nil)
+        else
+            pushChat("chat (non traduit)", original, nil)
+            log("traduction indisponible pour \"%s\" : %s", original, tostring(detected))
         end
-        pushChat("chat/" .. tostring(detected), original, (out ~= original) and out or nil)
-        if out == original then return end
+
+        if not out or out == original then return end
+        if not obj.Parent then return end
         local final = CONFIG.ShowOriginal and (original .. "  |  " .. out) or out
         Chat.written[obj] = final
         pcall(function() obj.Text = final end)
