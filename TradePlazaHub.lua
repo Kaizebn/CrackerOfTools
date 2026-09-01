@@ -50,15 +50,30 @@ if not LocalPlayer then
     LocalPlayer = Players.LocalPlayer
 end
 
+--==================================================================================
+--   R E G L A G E S   R A P I D E S      <-- c'est ici que tu changes tout
+--==================================================================================
+local MA_LANGUE    = "fr"            -- la langue que tu lis et dans laquelle tu ecris
+local LANGUE_REPLI = "en"            -- si la langue de l'autre n'est pas detectee
+local POLICE_CHAT  = "FredokaOne"    -- style des messages (liste dans Reglages)
+local TOUCHE_MENU  = "RightControl"  -- touche qui ouvre et ferme le hub
+--==================================================================================
+
+local function keyFromName(name)
+    local ok, key = pcall(function() return Enum.KeyCode[name] end)
+    if ok and key then return key end
+    return Enum.KeyCode.RightControl
+end
+
 ----------------------------------------------------------------------------------
 -- CONFIG
 ----------------------------------------------------------------------------------
 local CONFIG = {
-    Keybind      = Enum.KeyCode.RightControl,
+    Keybind      = keyFromName(TOUCHE_MENU),
 
     -- traduction
-    TranslateTo       = "fr",
-    SendAs            = "en",
+    TranslateTo       = MA_LANGUE,
+    SendAs            = LANGUE_REPLI,
     TranslateIncoming = true,
     PatchChatGui      = true,
     TranslateButtons  = false,  -- les boutons du jeu (Deal?, Last Offer...) sont
@@ -74,7 +89,7 @@ local CONFIG = {
     -- affichage
     ShowAvatars  = true,
     ShowModels   = true,
-    ChatFont     = "FredokaOne",  -- police des messages (onglet Reglages)
+    ChatFont     = POLICE_CHAT,   -- police des messages (onglet Reglages)
     ModelSize    = 110,         -- taille de l'apercu 3D des brainrots (px)
 
     -- decor de la base pris a tort pour un brainrot : compare en minuscules,
@@ -257,6 +272,28 @@ local function log(fmt, ...)
     if #State.Logs > 200 then table.remove(State.Logs, 1) end
     if UI and UI.pushLog then pcall(UI.pushLog, msg) end
     print("[TPH] " .. msg)
+end
+
+----------------------------------------------------------------------------------
+-- ANIMATION
+--   Une seule connexion Heartbeat pour TOUT ce qui bouge en continu. Chaque
+--   effet est une fonction : elle renvoie false quand son element a disparu,
+--   et elle est retiree de la liste. Rien ne tourne dans le vide.
+----------------------------------------------------------------------------------
+local Pulse = { items = {}, conn = nil, t = 0 }
+
+function Pulse.add(fn)
+    table.insert(Pulse.items, fn)
+    if not Pulse.conn then
+        Pulse.conn = Maid.conn(RunService.Heartbeat:Connect(function(dt)
+            if State.Unloaded then return end
+            Pulse.t = Pulse.t + dt
+            for i = #Pulse.items, 1, -1 do
+                local ok, keep = pcall(Pulse.items[i], Pulse.t, dt)
+                if not ok or keep == false then table.remove(Pulse.items, i) end
+            end
+        end))
+    end
 end
 
 local function notify(title, text, dur)
@@ -1141,6 +1178,46 @@ function Chat.root()
     return pg, false
 end
 
+-- Dans un trade il n'y a que deux joueurs. Quand la ligne du chat ne porte ni
+-- pseudo lisible ni avatar exploitable (beaucoup de jeux affichent une
+-- miniature dont l'URL ne contient plus l'UserId), on balaye toute la fenetre
+-- de trade a la recherche d'un joueur present : c'est forcement l'autre.
+function Chat.otherTrader()
+    local now = Util.clock()
+    if Chat.trader and Chat.trader.Parent and Chat.traderAt
+    and (now - Chat.traderAt) < 5 then
+        return Chat.trader
+    end
+    Chat.traderAt, Chat.trader = now, nil
+
+    local root = Chat.root()
+    if not root then return nil end
+    local top = root
+    while top and top.Parent and not top:IsA("ScreenGui") do top = top.Parent end
+    top = top or root
+
+    local ok, list = pcall(function() return top:GetDescendants() end)
+    if not ok then return nil end
+
+    for _, d in ipairs(list) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local plr = exactPlayer(d.Text)
+            if plr and plr ~= LocalPlayer then Chat.trader = plr break end
+        elseif d:IsA("ImageLabel") or d:IsA("ImageButton") then
+            local img = tostring(d.Image or "")
+            for id in string.gmatch(img, "(%d%d%d%d%d%d+)") do
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if tostring(plr.UserId) == id and plr ~= LocalPlayer then
+                        Chat.trader = plr
+                    end
+                end
+            end
+            if Chat.trader then break end
+        end
+    end
+    return Chat.trader
+end
+
 local function onChatPath(inst)
     local root, exact = Chat.root()
     if exact and root then
@@ -1202,6 +1279,7 @@ local function handleText(obj, silent)
         end
     end
     if not sender then sender = senderOf(obj) end
+    if not sender then sender = Chat.otherTrader() end
 
     spawnTask(function()
         local out, detected = Translator.translate(body, CONFIG.TranslateTo)
@@ -1373,6 +1451,92 @@ local function stroke(inst, color, thickness, transparency)
     })
 end
 
+-- contour degrade violet -> turquoise qui tourne lentement
+local function glowStroke(inst, thickness, transparency, speed)
+    local st = mk("UIStroke", {
+        Color = Color3.fromRGB(255, 255, 255), Thickness = thickness or 1.6,
+        Transparency = transparency or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = inst,
+    })
+    local grad = mk("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, THEME.accent),
+            ColorSequenceKeypoint.new(0.5, THEME.accent2),
+            ColorSequenceKeypoint.new(1, THEME.accent),
+        }),
+        Parent = st,
+    })
+    Pulse.add(function(t)
+        if not grad.Parent then return false end
+        grad.Rotation = (t * (speed or 28)) % 360
+        return true
+    end)
+    return st, grad
+end
+
+-- barre fine que la lumiere traverse en boucle
+local function sweepBar(parent, height)
+    local bar = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, height or 2), Position = UDim2.new(0, 0, 1, -(height or 2)),
+        BackgroundColor3 = THEME.accent2, BorderSizePixel = 0, Parent = parent,
+    })
+    local grad = mk("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, THEME.accent),
+            ColorSequenceKeypoint.new(0.5, THEME.accent2),
+            ColorSequenceKeypoint.new(1, THEME.accent),
+        }),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.38, 0.35),
+            NumberSequenceKeypoint.new(0.5, 0),
+            NumberSequenceKeypoint.new(0.62, 0.35),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+        Parent = bar,
+    })
+    Pulse.add(function(t)
+        if not grad.Parent then return false end
+        grad.Offset = Vector2.new(((t * 0.32) % 2) - 1, 0)
+        return true
+    end)
+    return bar
+end
+
+-- equerres de coin facon viseur
+local function corners(parent, size, thick, color)
+    size, thick = size or 14, thick or 2
+    local spots = {
+        { UDim2.new(0, 0, 0, 0), 1, 1 }, { UDim2.new(1, 0, 0, 0), -1, 1 },
+        { UDim2.new(0, 0, 1, 0), 1, -1 }, { UDim2.new(1, 0, 1, 0), -1, -1 },
+    }
+    local made = {}
+    for _, spot in ipairs(spots) do
+        local at, sx, sy = spot[1], spot[2], spot[3]
+        local h = mk("Frame", {
+            Size = UDim2.new(0, size, 0, thick),
+            Position = at + UDim2.new(0, sx > 0 and 0 or -size, 0, sy > 0 and 0 or -thick),
+            BackgroundColor3 = color or THEME.accent2, BorderSizePixel = 0,
+            ZIndex = 20, Parent = parent,
+        })
+        local v = mk("Frame", {
+            Size = UDim2.new(0, thick, 0, size),
+            Position = at + UDim2.new(0, sx > 0 and 0 or -thick, 0, sy > 0 and 0 or -size),
+            BackgroundColor3 = color or THEME.accent2, BorderSizePixel = 0,
+            ZIndex = 20, Parent = parent,
+        })
+        made[#made + 1] = h
+        made[#made + 1] = v
+    end
+    Pulse.add(function(t)
+        if not made[1] or not made[1].Parent then return false end
+        local a = 0.25 + 0.35 * (0.5 + 0.5 * math.sin(t * 1.8))
+        for _, f in ipairs(made) do f.BackgroundTransparency = a end
+        return true
+    end)
+    return made
+end
+
 local function pad(inst, all, top, bottom, left, right)
     return mk("UIPadding", {
         PaddingTop = UDim.new(0, top or all or 0),
@@ -1465,13 +1629,43 @@ local function modelIcon(parent, model, size)
             camera.Parent = viewport
             viewport.CurrentCamera = camera
 
+            -- Vue DE FACE : on prend l'orientation du modele lui-meme
+            -- (HumanoidRootPart, sinon PrimaryPart) et on place la camera
+            -- devant lui, au lieu d'un angle 3/4 pris au hasard du monde.
             local center, extents = clone:GetBoundingBox()
-            local radius = math.max(extents.Magnitude, 4)
-            -- cadrage serre : le modele remplit la vignette au lieu de flotter
-            local offset = Vector3.new(radius * 0.52, radius * 0.30, radius * 0.60)
-            camera.FieldOfView = 45
-            camera.CFrame = CFrame.new(center.Position + offset, center.Position)
+            local anchor = clone:FindFirstChild("HumanoidRootPart")
+                or clone.PrimaryPart
+                or clone:FindFirstChildWhichIsA("BasePart")
+            local dir = anchor and anchor.CFrame.LookVector or center.LookVector
+            if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, -1) end
+
+            local span = math.max(extents.X, extents.Y, extents.Z, 2)
+            local dist = span * 1.45 + 1.5
+            local eye  = center.Position + dir * dist + Vector3.new(0, extents.Y * 0.06, 0)
+            camera.FieldOfView = 40
+            camera.CFrame = CFrame.new(eye, center.Position)
             fallback.Visible = false
+
+            -- survole la vignette : le modele tourne sur lui-meme, puis
+            -- revient doucement de face quand la souris repart
+            local baseOff = eye - center.Position
+            local spinning, angle = false, 0
+            Maid.conn(holder.MouseEnter:Connect(function() spinning = true end))
+            Maid.conn(holder.MouseLeave:Connect(function() spinning = false end))
+            Pulse.add(function(_, dt)
+                if not viewport.Parent then return false end
+                if spinning then
+                    angle = angle + dt * 1.7
+                elseif angle ~= 0 then
+                    angle = angle * math.max(0, 1 - dt * 6)
+                    if math.abs(angle) < 0.003 then angle = 0 end
+                else
+                    return true          -- immobile : rien a recalculer
+                end
+                local rotated = CFrame.Angles(0, angle, 0):VectorToWorldSpace(baseOff)
+                camera.CFrame = CFrame.new(center.Position + rotated, center.Position)
+                return true
+            end)
         end)
         if not ok and fallback.Parent then fallback.Text = "3D" end
     end)
@@ -1514,7 +1708,8 @@ local window = corner(mk("Frame", {
     BackgroundColor3 = THEME.bg, BorderSizePixel = 0,
     ClipsDescendants = true, Parent = screen,
 }), 14)
-stroke(window, THEME.line, 1.5)
+glowStroke(window, 1.7, 0.08, 26)
+corners(window, 16, 2, THEME.accent2)
 
 local titleBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = THEME.surface,
@@ -1522,11 +1717,30 @@ local titleBar = mk("Frame", {
 })
 mk("UIGradient", { Color = ColorSequence.new(THEME.surface, THEME.card),
     Rotation = 90, Parent = titleBar })
+sweepBar(titleBar, 2)
 
-corner(mk("Frame", {
-    Size = UDim2.new(0, 10, 0, 10), Position = UDim2.new(0, 18, 0.5, -5),
-    BackgroundColor3 = THEME.accent, BorderSizePixel = 0, Parent = titleBar,
-}), 5)
+-- le point de titre respire, avec un halo qui bat autour
+do
+    local halo = corner(mk("Frame", {
+        Size = UDim2.new(0, 22, 0, 22), Position = UDim2.new(0, 12, 0.5, -11),
+        BackgroundColor3 = THEME.accent, BackgroundTransparency = 0.8,
+        BorderSizePixel = 0, Parent = titleBar,
+    }), 11)
+    local dot = corner(mk("Frame", {
+        Size = UDim2.new(0, 10, 0, 10), Position = UDim2.new(0, 18, 0.5, -5),
+        BackgroundColor3 = THEME.accent, BorderSizePixel = 0, Parent = titleBar,
+    }), 5)
+    Pulse.add(function(t)
+        if not halo.Parent then return false end
+        local k = 0.5 + 0.5 * math.sin(t * 2.4)
+        local size = 18 + 10 * k
+        halo.Size = UDim2.new(0, size, 0, size)
+        halo.Position = UDim2.new(0, 23 - size / 2, 0.5, -size / 2)
+        halo.BackgroundTransparency = 0.72 + 0.22 * k
+        dot.BackgroundColor3 = THEME.accent:Lerp(THEME.accent2, k)
+        return true
+    end)
+end
 
 mk("TextLabel", {
     Size = UDim2.new(0, 240, 1, 0), Position = UDim2.new(0, 36, 0, 0),
@@ -1590,6 +1804,12 @@ local statusDot = corner(mk("Frame", {
     Size = UDim2.new(0, 7, 0, 7), Position = UDim2.new(0, 16, 0.5, -3.5),
     BackgroundColor3 = THEME.sub, BorderSizePixel = 0, Parent = statusBar,
 }), 4)
+Pulse.add(function(t)
+    if not statusDot.Parent then return false end
+    statusDot.BackgroundTransparency = 0.15 * (0.5 + 0.5 * math.sin(t * 3.1))
+    return true
+end)
+sweepBar(statusBar, 1).Position = UDim2.new(0, 0, 0, 0)
 local statusText = mk("TextLabel", {
     Size = UDim2.new(1, -40, 1, 0), Position = UDim2.new(0, 30, 0, 0),
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = "initialisation...",
@@ -1657,8 +1877,10 @@ local function addTab(name)
         TextXAlignment = Enum.TextXAlignment.Left, Parent = tab,
     })
 
+    local tabGlow = glowStroke(tab, 1.4, 1, 34)
+
     UI.pages[name] = page
-    UI.tabs[name] = { button = tab, label = tabLabel, mark = mark }
+    UI.tabs[name] = { button = tab, label = tabLabel, mark = mark, glow = tabGlow }
 
     Maid.conn(tab.MouseEnter:Connect(function()
         if not page.Visible then tween(tab, { BackgroundTransparency = 0.5 }, 0.15) end
@@ -1678,6 +1900,7 @@ function UI.select(name)
         tween(t.button, { BackgroundTransparency = active and 0 or 1 }, 0.16)
         tween(t.label, { TextColor3 = active and THEME.text or THEME.sub }, 0.16)
         tween(t.mark, { Size = UDim2.new(0, 3, 0, active and 20 or 0) }, 0.18)
+        tween(t.glow, { Transparency = active and 0.25 or 1 }, 0.2)
     end
 end
 
@@ -1745,10 +1968,20 @@ local function btn(parent, opts)
         Text = opts.text, TextSize = opts.textSize or 12, TextColor3 = textColor,
         BorderSizePixel = 0, Parent = parent,
     }), 8)
+    local halo = mk("UIStroke", {
+        Color = THEME.accent2, Thickness = 1.4, Transparency = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = b,
+    })
     if style == "ghost" then stroke(b, THEME.line, 1, 0.4) end
 
-    Maid.conn(b.MouseEnter:Connect(function() tween(b, { BackgroundColor3 = hover }, 0.14) end))
-    Maid.conn(b.MouseLeave:Connect(function() tween(b, { BackgroundColor3 = base }, 0.14) end))
+    Maid.conn(b.MouseEnter:Connect(function()
+        tween(b, { BackgroundColor3 = hover }, 0.14)
+        tween(halo, { Transparency = 0.15, Thickness = 2 }, 0.16)
+    end))
+    Maid.conn(b.MouseLeave:Connect(function()
+        tween(b, { BackgroundColor3 = base }, 0.14)
+        tween(halo, { Transparency = 1, Thickness = 1.4 }, 0.22)
+    end))
     Maid.conn(b.MouseButton1Click:Connect(function()
         spawnTask(function()
             local ok, err = pcall(opts.callback)
@@ -2051,16 +2284,7 @@ btn(cardList, { text = "Rafraichir", callback = function()
 end })
 
 local cardBase = card(pagePlayers, "Base")
-local baseSummary = note(cardBase, "aucune base affichee", THEME.text)
-local rowBase = rowOf(cardBase)
-btn(rowBase, { text = "Ma base", width = 110, style = "primary",
-    callback = function() scanBase(LocalPlayer) end })
-btn(rowBase, { text = "Copier la structure", width = 160, callback = function()
-    if not State.Plot then setStatus("affiche d'abord une base", THEME.bad) return end
-    local dump = Inspector.dump(State.Plot, 400)
-    if Util.copy(dump) then setStatus("structure copiee", THEME.good)
-    else print(dump) setStatus("presse-papier indispo -> console F9", THEME.warn) end
-end })
+local baseSummary = note(cardBase, "choisis un joueur pour voir ses brainrots", THEME.text)
 local brainrotPanel, brainrotHolder = hpanel(cardBase, 190)
 
 local function playerRow(scroll, plr)
@@ -2125,18 +2349,41 @@ end
 
 -- une vignette = le modele 3D en haut, le nom, la rarete et le revenu dessous.
 -- Elles se suivent horizontalement, la plus rare en premier.
-local function brainrotTile(scroll, entry)
+local function brainrotTile(scroll, entry, index)
     local size = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
     local col  = rarityColor(entry.rarity)
 
     local tile = corner(mk("Frame", {
         Size = UDim2.new(0, size + 16, 0, size + 64), BackgroundColor3 = THEME.card,
-        BackgroundTransparency = 0.15, BorderSizePixel = 0, Parent = scroll,
+        BackgroundTransparency = 1, BorderSizePixel = 0, Parent = scroll,
     }), 10)
-    stroke(tile, col, 1.5, 0.3)
+    local tileStroke = stroke(tile, col, 1.5, 1)
 
     local icon = modelIcon(tile, entry.model, size)
-    icon.Position = UDim2.new(0, 8, 0, 8)
+    icon.Position = UDim2.new(0, 8 + size / 2, 0, 8 + size / 2)
+    icon.Size = UDim2.new(0, 0, 0, 0)
+
+    -- eclosion en cascade : la vignette apparait puis le modele se deploie
+    spawnTask(function()
+        waitFor(0.03 * ((index or 1) - 1))
+        if State.Unloaded or not tile.Parent then return end
+        tween(tile, { BackgroundTransparency = 0.15 }, 0.22)
+        tween(tileStroke, { Transparency = 0.3 }, 0.28)
+        tween(icon, {
+            Size = UDim2.new(0, size, 0, size),
+            Position = UDim2.new(0, 8, 0, 8),
+        }, 0.38, Enum.EasingStyle.Back)
+    end)
+
+    -- survol : la vignette se soulit et son contour s'allume
+    Maid.conn(tile.MouseEnter:Connect(function()
+        tween(tile, { BackgroundTransparency = 0 }, 0.14)
+        tween(tileStroke, { Transparency = 0, Thickness = 2.4 }, 0.14)
+    end))
+    Maid.conn(tile.MouseLeave:Connect(function()
+        tween(tile, { BackgroundTransparency = 0.15 }, 0.2)
+        tween(tileStroke, { Transparency = 0.3, Thickness = 1.5 }, 0.2)
+    end))
 
     if entry.count > 1 then
         local badge = corner(mk("Frame", {
@@ -2193,12 +2440,12 @@ scanBase = function(player, model, ownerName)
 
     if #list == 0 then
         textLine(brainrotPanel, "aucun brainrot reconnu sur cette base", THEME.bad, Enum.Font.Gotham)
-        textLine(brainrotPanel, "clique sur 'Copier la structure' et envoie-moi le resultat",
+        textLine(brainrotPanel, "sa base est peut-etre vide, ou le jeu range ses objets ailleurs",
             THEME.sub, Enum.Font.Gotham)
     else
         for i, entry in ipairs(list) do
             if i > 60 then break end
-            brainrotTile(brainrotPanel, entry)
+            brainrotTile(brainrotPanel, entry, i)
         end
     end
     setStatus("base de " .. ownerName .. " : " .. count .. " brainrots", THEME.good)
@@ -2327,9 +2574,12 @@ local function chatRow(scroll, entry)
     local msgH  = textHeight(body, font, 15, textW) + 4
     local rowH  = math.max(34, 17 + msgH) + 8
 
+    -- la ligne s'ouvre en hauteur pendant que le texte apparait
     local row = mk("Frame", {
-        Size = UDim2.new(1, -6, 0, rowH), BackgroundTransparency = 1, Parent = scroll,
+        Size = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1,
+        ClipsDescendants = true, Parent = scroll,
     })
+    tween(row, { Size = UDim2.new(1, -6, 0, rowH) }, 0.24)
 
     if entry.userId then
         local head = avatar(row, entry.userId, 30)
@@ -2346,21 +2596,26 @@ local function chatRow(scroll, entry)
         })
     end
 
-    mk("TextLabel", {
+    local nameLbl = mk("TextLabel", {
         Size = UDim2.new(1, -46, 0, 15), Position = UDim2.new(0, 40, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = entry.who or "joueur", TextSize = 11,
         TextColor3 = entry.mine and THEME.accent or THEME.text,
-        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
-    mk("TextLabel", {
-        Size = UDim2.new(1, -46, 0, msgH), Position = UDim2.new(0, 40, 0, 17),
+    local msgLbl = mk("TextLabel", {
+        Size = UDim2.new(1, -46, 0, msgH), Position = UDim2.new(0, 46, 0, 17),
         BackgroundTransparency = 1, Font = font, Text = body, TextSize = 15,
-        TextColor3 = THEME.msg, TextWrapped = true,
+        TextColor3 = THEME.msg, TextWrapped = true, TextTransparency = 1,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, Parent = row,
     })
+    tween(nameLbl, { TextTransparency = 0 }, 0.26)
+    tween(msgLbl, {
+        TextTransparency = 0,
+        Position = UDim2.new(0, 40, 0, 17),
+    }, 0.34)
     return row
 end
 
