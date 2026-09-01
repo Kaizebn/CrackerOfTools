@@ -2,19 +2,28 @@
 ==================================================================================
     TRADE PLAZA HUB  v3   --  script client (executor / LocalScript)
 ==================================================================================
-    4 onglets seulement :
-      JOUEURS  - liste avec la tete de chaque joueur, TP vers sa base, send trade
+    VERSION LECTURE SEULE
+    ---------------------
+    Ce hub ne touche a rien. Il n'envoie AUCUN appel au serveur, ne deplace
+    pas le personnage et n'installe aucun hook. Il lit ce qui est deja charge
+    chez toi et l'affiche. Rien la-dedans ne peut declencher un anti-cheat.
+
+    Ce qui a ete retire, et pourquoi :
+      - deplacement (vol BodyVelocity, marche auto, CFrame, noclip)
+        -> le serveur compare ta position d'une frame a l'autre avec ta
+           WalkSpeed : peu importe COMMENT tu bouges, la trajectoire est
+           impossible et c'est ca qui fait kick.
+      - invitation de trade, envoi de chat (FireServer / InvokeServer)
+        -> un remote appele avec des arguments que le serveur n'attend pas
+           fait kick, meme a un seul appel.
+      - hookmetamethod sur __namecall
+        -> detectable cote client, quoi qu'on en fasse.
+
+    4 onglets :
+      JOUEURS  - liste avec la tete de chaque joueur
       BASE     - scanner de brainrots avec apercu 3D, mutation et revenu/s
-      CHAT     - traducteur du chat de trade (entrant + sortant)
-      REGLAGES - mode de deplacement, vitesse, langues, journal
-
-    Deplacement : le personnage bouge UNIQUEMENT avec le moteur physique
-    (BodyVelocity) ou en marchant. Aucune ecriture de CFrame sur le personnage,
-    aucun noclip : rien de ce que les anticheats de position savent detecter.
-
-    Remotes : un seul remote d'invitation et un seul remote de chat sont
-    utilises, et chaque envoi passe par un limiteur de debit (pas de rafale,
-    donc pas de rate limit serveur).
+      CHAT     - traducteur du chat (lecture) + traduction a coller toi-meme
+      REGLAGES - langues, affichage, journal
 
     Touche menu : RightControl
 ==================================================================================
@@ -40,25 +49,11 @@ if not LocalPlayer then
     LocalPlayer = Players.LocalPlayer
 end
 
-local unpack = unpack or table.unpack
-
 ----------------------------------------------------------------------------------
 -- CONFIG
 ----------------------------------------------------------------------------------
 local CONFIG = {
     Keybind      = Enum.KeyCode.RightControl,
-
-    -- deplacement (aucun mode n'ecrit de CFrame sur le personnage)
-    TPMode       = "physique",  -- physique | marche
-    TPSpeed      = 45,          -- studs/seconde (45 = a peine plus qu'une course)
-    TPAltitude   = 18,          -- hauteur de survol
-    TPLandSlow   = true,        -- descente freinee : plus de degats de chute
-
-    -- limiteur d'envoi des remotes (secondes)
-    RemoteMinGap   = 0.8,       -- delai minimum entre deux appels, tous remotes confondus
-    RemoteCooldown = 1.5,       -- delai minimum entre deux appels du meme remote
-    InviteCooldown = 6,         -- delai minimum entre deux invitations de trade
-    ChatCooldown   = 2,         -- delai minimum entre deux messages
 
     -- traduction
     TranslateTo       = "fr",
@@ -71,16 +66,12 @@ local CONFIG = {
     ShowAvatars  = true,
     ShowModels   = true,
 
-    ArgMode      = "auto",
     RemotePaths  = {},
 }
 
 if type(GENV.TradePlazaHubConfig) == "table" then
     for k, v in pairs(GENV.TradePlazaHubConfig) do CONFIG[k] = v end
 end
-
--- le mode "cframe" a ete supprime : toute valeur inconnue retombe sur "physique"
-if CONFIG.TPMode ~= "marche" then CONFIG.TPMode = "physique" end
 
 local LANGS = {
     "fr","en","es","pt","pt-BR","de","it","nl","pl","tr","ru","uk","ar",
@@ -95,10 +86,7 @@ Env.request        = (syn and syn.request) or (http and http.request)
                      or (fluxus and fluxus.request) or http_request or request
 Env.clipboard      = setclipboard or toclipboard or (syn and syn.write_clipboard)
 Env.gethui         = gethui
-Env.hookmetamethod = hookmetamethod
-Env.getnamecall    = getnamecallmethod
-Env.checkcaller    = checkcaller
-Env.isExecutor     = (Env.request ~= nil) or (Env.hookmetamethod ~= nil)
+Env.isExecutor     = (Env.request ~= nil) or (gethui ~= nil)
 
 local function spawnTask(fn)
     if task and task.spawn then return task.spawn(fn) end
@@ -198,12 +186,11 @@ function Maid.clean()
 end
 
 local State = {
-    Unloaded = false, Travelling = false, Cancel = false,
-    LastPos = nil, Logs = {}, ChatLog = {},
+    Unloaded = false, Logs = {}, ChatLog = {},
     Plot = nil, PlotOwner = nil,
 }
 
-local UI, Spy, Hook
+local UI
 
 local function log(fmt, ...)
     local ok, msg = pcall(string.format, tostring(fmt), ...)
@@ -224,7 +211,10 @@ local function notify(title, text, dur)
 end
 
 ----------------------------------------------------------------------------------
--- REMOTES
+-- REMOTES (LECTURE SEULE)
+--   On localise un remote uniquement pour ECOUTER ce que le serveur nous
+--   envoie (OnClientEvent). Aucun FireServer / InvokeServer nulle part dans
+--   ce fichier : rien ne part vers le serveur.
 ----------------------------------------------------------------------------------
 local Remotes = { cache = {} }
 
@@ -286,90 +276,6 @@ function Remotes:Find(name)
         log("remote '%s' -> %s", name, best:GetFullName())
     end
     return best
-end
-
-function Remotes:Trade()
-    local out = {}
-    for _, d in ipairs(allRemotes()) do
-        if string.find(Util.lower(d:GetFullName()), "trade", 1, true) then
-            table.insert(out, d)
-        end
-    end
-    table.sort(out, function(a, b) return a:GetFullName() < b:GetFullName() end)
-    return out
-end
-
-----------------------------------------------------------------------------------
--- LIMITEUR DE DEBIT
---   Tout appel serveur du hub passe par ici. Deux verrous : un delai global
---   entre deux appels quels qu'ils soient, et un delai par remote. Un remote
---   appele trop tot n'est pas mis en file d'attente, il est simplement refuse :
---   ca evite la rafale qui declenche le rate limit (voire le kick) du serveur.
-----------------------------------------------------------------------------------
-local Limiter = { lastGlobal = 0, lastByRemote = {}, lastByAction = {} }
-
-local function now()
-    if os and os.clock then return os.clock() end
-    return tick()
-end
-
-function Limiter:check(remote)
-    local t = now()
-    local gap = tonumber(CONFIG.RemoteMinGap) or 0.8
-    if t - self.lastGlobal < gap then
-        return false, string.format("trop rapide, attends %.1fs", gap - (t - self.lastGlobal))
-    end
-    local key = tostring(remote)
-    local cooldown = tonumber(CONFIG.RemoteCooldown) or 1.5
-    local last = self.lastByRemote[key] or 0
-    if t - last < cooldown then
-        return false, string.format("%s en cooldown (%.1fs)", remote.Name, cooldown - (t - last))
-    end
-    return true
-end
-
-function Limiter:stamp(remote)
-    local t = now()
-    self.lastGlobal = t
-    self.lastByRemote[tostring(remote)] = t
-end
-
--- cooldown par action (invitation, chat) en plus du cooldown par remote
-function Limiter:action(name, seconds)
-    local t = now()
-    local last = self.lastByAction[name] or 0
-    if t - last < seconds then
-        return false, string.format("attends encore %.1fs", seconds - (t - last))
-    end
-    self.lastByAction[name] = t
-    return true
-end
-
--- appel avec delai maxi : un InvokeServer sans reponse ne fige plus le hub
-local function callRemote(remote, args, n, timeout)
-    local allowed, why = Limiter:check(remote)
-    if not allowed then
-        log("appel refuse par le limiteur : %s", why)
-        return "cooldown", why
-    end
-    Limiter:stamp(remote)
-
-    local finished, success, result = false, false, nil
-    spawnTask(function()
-        local ok, res
-        if remote:IsA("RemoteFunction") then
-            ok, res = pcall(function() return remote:InvokeServer(unpack(args, 1, n)) end)
-        else
-            ok, res = pcall(function() remote:FireServer(unpack(args, 1, n)) end)
-        end
-        finished, success, result = true, ok, res
-    end)
-    local waited = 0
-    while not finished and waited < (timeout or 5) do
-        waited = waited + RunService.Heartbeat:Wait()
-    end
-    if not finished then return "timeout", nil end
-    return success and "ok" or "error", result
 end
 
 ----------------------------------------------------------------------------------
@@ -534,189 +440,6 @@ function Plots:ForPlayer(player)
         end
     end
     return nil, nil
-end
-
-----------------------------------------------------------------------------------
--- DEPLACEMENT
---   mode "physique" : on n'ecrit JAMAIS de CFrame sur le personnage. On pose un
---   BodyVelocity et on laisse le moteur physique deplacer le personnage,
---   exactement comme un joueur qui court ou tombe. Pour le serveur c'est un
---   mouvement continu et legitime : rien a detecter comme teleport, et pas de
---   degat de chute puisque la vitesse de descente reste controlee.
---   mode "marche" : Humanoid:MoveTo, le personnage marche pour de vrai.
---   Le mode "cframe" (ecriture directe de root.CFrame) et le noclip
---   (CanCollide force depuis le client) ont ete supprimes : c'est exactement
---   ce que les anti-teleport reperent.
-----------------------------------------------------------------------------------
-local TP = {}
-
-function TP.root()
-    local char = LocalPlayer.Character
-    return char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart) or nil
-end
-
-function TP.humanoid()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChildWhichIsA("Humanoid") or nil
-end
-
-local mover
-
-local function clearMover()
-    if mover then pcall(function() mover:Destroy() end) mover = nil end
-end
-
-local function makeMover(root)
-    clearMover()
-    local created
-    local ok = pcall(function()
-        created = Instance.new("BodyVelocity")
-        created.Name = "TPH_Move"
-        created.MaxForce = Vector3.new(100000, 100000, 100000)
-        created.P = 3000
-        created.Velocity = Vector3.new(0, 0, 0)
-        created.Parent = root
-    end)
-    if not ok or not created then return nil end
-    mover = created
-    return mover
-end
-
-local function cleanupTravel()
-    clearMover()
-    State.Travelling = false
-end
-
--- avance vers un point avec la physique, en freinant a l'approche
-local function flySegment(target, speed)
-    local guard = 0
-    while true do
-        if State.Unloaded or State.Cancel then return false, "annule" end
-        local root = TP.root()
-        if not root then return false, "personnage perdu (mort / respawn)" end
-
-        local delta = target - root.Position
-        local dist = delta.Magnitude
-        if dist <= 3 then return true end
-
-        local dt = RunService.Heartbeat:Wait()
-        guard = guard + dt
-        if guard > 75 then return false, "trajet trop long (bloque ?)" end
-
-        local wanted = math.min(speed, math.max(6, dist * 1.4))
-        local velocity = delta.Unit * wanted
-        if mover and mover.Parent then
-            mover.Velocity = velocity
-        else
-            local ok = pcall(function() root.AssemblyLinearVelocity = velocity end)
-            if not ok then pcall(function() root.Velocity = velocity end) end
-        end
-    end
-end
-
-function TP.flyTo(goalCF)
-    local root = TP.root()
-    if not root then return false, "personnage introuvable" end
-
-    local speed    = Util.clamp(CONFIG.TPSpeed, 10, 250)
-    local startPos = root.Position
-    local goalPos  = goalCF.Position + Vector3.new(0, 4, 0)
-    local cruise   = math.max(startPos.Y, goalPos.Y) + Util.clamp(CONFIG.TPAltitude, 0, 200)
-
-    makeMover(root)
-
-    local waypoints = {
-        Vector3.new(startPos.X, cruise, startPos.Z),
-        Vector3.new(goalPos.X, cruise, goalPos.Z),
-        goalPos,
-    }
-    for _, point in ipairs(waypoints) do
-        local ok, err = flySegment(point, speed)
-        if not ok then cleanupTravel() return false, err end
-    end
-
-    -- atterrissage freine : la vitesse verticale reste faible, donc aucun degat
-    if CONFIG.TPLandSlow and mover and mover.Parent then
-        mover.Velocity = Vector3.new(0, -10, 0)
-        local t = 0
-        while t < 0.4 do t = t + RunService.Heartbeat:Wait() end
-    end
-    clearMover()
-
-    -- on reste immobile un instant : le serveur revalide la position au calme
-    local t2 = 0
-    while t2 < 0.25 do t2 = t2 + RunService.Heartbeat:Wait() end
-    return true
-end
-
--- le personnage marche vraiment : rien a detecter, mais lent et bloque par les murs
-function TP.walkTo(goalCF)
-    local hum = TP.humanoid()
-    if not hum then return false, "humanoid introuvable" end
-    local target, elapsed = goalCF.Position, 0
-    while true do
-        if State.Unloaded or State.Cancel then return false, "annule" end
-        local root = TP.root()
-        if not root then return false, "personnage perdu" end
-        if (root.Position - target).Magnitude < 8 then return true end
-        hum:MoveTo(target)
-        elapsed = elapsed + RunService.Heartbeat:Wait()
-        if elapsed > 120 then return false, "marche trop longue (obstacle ?)" end
-    end
-end
-
-function TP.travel(goalCF)
-    if State.Travelling then return false, "un deplacement est deja en cours" end
-    local root = TP.root()
-    if not root then return false, "personnage introuvable" end
-    if typeof(goalCF) == "Vector3" then goalCF = CFrame.new(goalCF) end
-    if typeof(goalCF) ~= "CFrame" then return false, "destination invalide" end
-
-    State.Travelling, State.Cancel = true, false
-    State.LastPos = root.CFrame
-
-    -- si le personnage meurt pendant le trajet on arrete tout proprement
-    local hum = TP.humanoid()
-    local diedConn
-    if hum then
-        diedConn = hum.Died:Connect(function()
-            State.Cancel = true
-            cleanupTravel()
-            log("mort pendant le deplacement : essaie une vitesse plus basse")
-        end)
-    end
-
-    local ok, err
-    if CONFIG.TPMode == "marche" then ok, err = TP.walkTo(goalCF)
-    else ok, err = TP.flyTo(goalCF) end
-
-    if diedConn then pcall(function() diedConn:Disconnect() end) end
-    cleanupTravel()
-    return ok, err
-end
-
-function TP.stop()
-    State.Cancel = true
-    cleanupTravel()
-end
-
-function TP.back()
-    if not State.LastPos then return false, "aucune position sauvegardee" end
-    return TP.travel(State.LastPos)
-end
-
-function TP.toPlayer(player)
-    local char = player.Character
-    local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-    if not root then return false, "ce joueur n'a pas de personnage charge" end
-    return TP.travel(root.CFrame * CFrame.new(0, 0, 5))
-end
-
-function TP.toBase(player)
-    local model, cf = Plots:ForPlayer(player)
-    if not model or not cf then return false, "base introuvable pour " .. player.Name end
-    State.Plot, State.PlotOwner = model, player.Name
-    return TP.travel(cf)
 end
 
 ----------------------------------------------------------------------------------
@@ -908,89 +631,6 @@ function Inspector.dump(plot, maxLines)
 end
 
 ----------------------------------------------------------------------------------
--- TRADE
-----------------------------------------------------------------------------------
-local Trade = {}
-local INVITE_WORDS = { "invite", "sendrequest", "traderequest", "requesttrade",
-                       "sendtrade", "request", "invitation" }
-
--- on ne garde que LE remote d'invitation le plus probable : plus de balayage
--- de tous les remotes du jeu, un seul appel part par clic
-function Trade.candidates()
-    local scored = {}
-    for _, remote in ipairs(Remotes:Trade()) do
-        local n = Util.lower(remote.Name)
-        local score = 0
-        if n == "invite" then score = 100
-        else
-            for i, word in ipairs(INVITE_WORDS) do
-                if string.find(n, word, 1, true) then score = 60 - i break end
-            end
-        end
-        if score > 0 then table.insert(scored, { remote = remote, score = score }) end
-    end
-    if #scored == 0 then
-        for _, name in ipairs({ "Invite", "SendRequest", "TradeRequest", "RequestTrade" }) do
-            local remote = Remotes:Find(name)
-            if remote then table.insert(scored, { remote = remote, score = 10 }) end
-        end
-    end
-    table.sort(scored, function(a, b) return a.score > b.score end)
-    local out = {}
-    for _, entry in ipairs(scored) do table.insert(out, entry.remote) end
-    return out
-end
-
--- une seule forme d'argument est envoyee par clic (jamais les 4 a la suite)
-local function argShape(player, userId)
-    local mode = CONFIG.ArgMode
-    if mode == "userid" and userId then return { userId }, 1, "userid" end
-    if mode == "name" and player then return { player.Name }, 1, "name" end
-    if mode == "player" and player then return { player }, 1, "player" end
-    if player then return { player }, 1, "player" end
-    if userId then return { userId }, 1, "userid" end
-    return nil
-end
-
-function Trade.invite(query)
-    local player, err = PlayerUtil.byQuery(query)
-    local userId = (player and player.UserId) or tonumber(query) or PlayerUtil.userIdOf(query)
-    if not player and not userId then return false, err or "joueur introuvable" end
-    local who = player and player.Name or tostring(userId)
-
-    local free, wait = Limiter:action("invite", tonumber(CONFIG.InviteCooldown) or 6)
-    if not free then return false, "invitation trop rapprochee : " .. wait end
-
-    -- 1) rejouer l'appel exact que le jeu envoie quand tu cliques sur son bouton
-    --    (capture automatique en arriere-plan) : c'est un seul appel, la bonne
-    --    signature du premier coup
-    local template = Spy and Spy.templates and Spy.templates.invite
-    if template then
-        local ok, res = Spy.replay(template, { target = player, userId = userId })
-        if ok then return true, "trade envoye a " .. who end
-        -- on n'enchaine PAS un deuxieme appel derriere un echec : c'est cette
-        -- rafale la qui faisait sauter le rate limit. Un clic = un appel.
-        return false, "le serveur a refuse l'appel appris (" .. tostring(res) .. ")"
-    end
-
-    -- 2) sinon : LE meilleur remote, UN seul appel
-    local remote = Trade.candidates()[1]
-    if not remote then return false, "aucun remote d'invitation trouve dans ce jeu" end
-
-    local args, n, label = argShape(player, userId)
-    if not args then return false, "joueur introuvable" end
-
-    local status, res = callRemote(remote, args, n, 5)
-    log("%s[%s] -> %s (%s)", remote.Name, label, status, tostring(res))
-    if status == "ok" and res ~= false then
-        CONFIG.ArgMode = label
-        return true, "trade envoye a " .. who .. " (" .. remote.Name .. ")"
-    end
-    if status == "cooldown" then return false, "remote en cooldown, reessaie dans un instant" end
-    return false, "le serveur a refuse (" .. remote.Name .. ") - ouvre le vrai menu de trade une fois, le hub apprendra l'appel"
-end
-
-----------------------------------------------------------------------------------
 -- TRADUCTEUR
 ----------------------------------------------------------------------------------
 local Translator = { cache = {} }
@@ -1067,6 +707,7 @@ local function pushChat(who, original, translated)
     if UI and UI.pushChat then pcall(UI.pushChat, entry) end
 end
 
+-- uniquement pour s'y ABONNER (OnClientEvent), jamais pour y envoyer
 function Chat.getRemote()
     if Chat.remote and Chat.remote.Parent then return Chat.remote end
     Chat.remote = Remotes:Find("SendChatMessage") or Remotes:Find("ChatMessage")
@@ -1074,34 +715,24 @@ function Chat.getRemote()
     return Chat.remote
 end
 
-function Chat.send(text, translateTo)
+-- Le hub n'envoie plus rien : il traduit et met le resultat dans le
+-- presse-papier. C'est toi qui colles dans le vrai chat du jeu, donc le
+-- message part par le chemin normal du client et le serveur ne voit rien
+-- d'anormal.
+-- retourne : ok, texte final, copie dans le presse-papier ?
+function Chat.prepare(text, translateTo)
     text = Util.trim(text or "")
     if text == "" then return false, "message vide" end
 
-    local free, wait = Limiter:action("chat", tonumber(CONFIG.ChatCooldown) or 2)
-    if not free then return false, "message trop rapproche : " .. wait end
-
     local final = text
     if translateTo and translateTo ~= "" then
-        local out = Translator.translate(text, translateTo)
-        if out then final = out end
+        local out, info = Translator.translate(text, translateTo)
+        if out then final = out
+        else return false, "traduction impossible (" .. tostring(info) .. ")" end
     end
 
-    local template = Spy and Spy.templates and Spy.templates.chat
-    if template then
-        local ok = Spy.replay(template, { message = final })
-        if ok then
-            pushChat("moi", text, (final ~= text) and final or nil)
-            return true, final
-        end
-    end
-
-    local remote = Chat.getRemote()
-    if not remote then return false, "remote de chat introuvable" end
-    local status, res = callRemote(remote, { final }, 1, 5)
-    if status ~= "ok" then return false, "echec envoi (" .. status .. ") " .. tostring(res) end
-    pushChat("moi", text, (final ~= text) and final or nil)
-    return true, final
+    pushChat("a coller", text, (final ~= text) and final or nil)
+    return true, final, Util.copy(final)
 end
 
 local function extractMessage(...)
@@ -1162,115 +793,6 @@ function Chat.patchGui()
     for _, d in ipairs(pg:GetDescendants()) do
         if d:IsA("TextLabel") then handle(d) end
     end
-end
-
-----------------------------------------------------------------------------------
--- APPRENTISSAGE SILENCIEUX DES APPELS DU JEU (aucun onglet, ca tourne tout seul)
---   Quand tu utilises le vrai menu de trade du jeu, on enregistre l'appel exact
---   envoye au serveur. Le bouton "Envoyer le trade" rejoue ensuite ce meme appel
---   avec le joueur de ton choix : la signature est forcement la bonne.
-----------------------------------------------------------------------------------
-Spy = { templates = {}, records = {}, active = true, max = 20 }
-
-local function analyseRecord(rec)
-    for i = 1, rec.n do
-        local v = rec.args[i]
-        if typeof(v) == "Instance" and v:IsA("Player") then
-            if not rec.targetIndex then rec.targetIndex, rec.targetKind = i, "player" end
-        elseif type(v) == "number" then
-            if not rec.targetIndex then
-                for _, plr in ipairs(Players:GetPlayers()) do
-                    if plr.UserId == v then rec.targetIndex, rec.targetKind = i, "userid" break end
-                end
-            end
-        elseif type(v) == "string" then
-            local asPlayer = nil
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr.Name == v then asPlayer = plr break end
-            end
-            if asPlayer and not rec.targetIndex then
-                rec.targetIndex, rec.targetKind = i, "name"
-            elseif not rec.stringIndex then
-                rec.stringIndex = i
-            end
-        end
-    end
-    return rec
-end
-
-function Spy.record(remote, method, args, n)
-    local rec = { remote = remote, name = remote.Name, method = method,
-                  args = args, n = n, at = os.date("%H:%M:%S") }
-    analyseRecord(rec)
-    table.insert(Spy.records, rec)
-    if #Spy.records > Spy.max then table.remove(Spy.records, 1) end
-
-    local lname = Util.lower(rec.name)
-    if rec.targetIndex and (string.find(lname, "invite", 1, true)
-       or string.find(lname, "request", 1, true)) then
-        Spy.templates.invite = rec
-        log("appel de trade appris : %s (%d arguments)", rec.name, rec.n)
-        if UI and UI.setLearned then pcall(UI.setLearned) end
-    elseif rec.stringIndex and (string.find(lname, "chat", 1, true)
-       or string.find(lname, "message", 1, true)) then
-        Spy.templates.chat = rec
-        log("appel de chat appris : %s (%d arguments)", rec.name, rec.n)
-        if UI and UI.setLearned then pcall(UI.setLearned) end
-    end
-    return rec
-end
-
-function Spy.replay(rec, subs)
-    if not rec or not rec.remote or not rec.remote.Parent then return false, "modele invalide" end
-    subs = subs or {}
-    local args = {}
-    for i = 1, rec.n do args[i] = rec.args[i] end
-
-    if rec.targetIndex then
-        if rec.targetKind == "player" and subs.target then
-            args[rec.targetIndex] = subs.target
-        elseif rec.targetKind == "userid" and subs.userId then
-            args[rec.targetIndex] = subs.userId
-        elseif rec.targetKind == "name" and subs.target then
-            args[rec.targetIndex] = subs.target.Name
-        end
-    end
-    if subs.message and rec.stringIndex then args[rec.stringIndex] = subs.message end
-
-    local status, res = callRemote(rec.remote, args, rec.n, 5)
-    if status == "ok" then return true, res end
-    return false, status .. " " .. tostring(res)
-end
-
--- Le hook est en LECTURE SEULE : il note la signature des appels de trade du
--- jeu et laisse toujours passer l'appel d'origine. Il n'intercepte plus, ne
--- reecrit plus et ne renvoie plus d'appel a la place du jeu (ce doublon de
--- remote comptait dans le rate limit, et modifier un message deja parti est de
--- toute facon le travail du serveur, pas du client).
-Hook = { installed = false }
-
-function Hook.install()
-    if Hook.installed then return true end
-    if not (Env.hookmetamethod and Env.getnamecall) then return false end
-
-    local old
-    old = Env.hookmetamethod(game, "__namecall", function(self, ...)
-        local okMethod, method = pcall(Env.getnamecall)
-        if not okMethod or State.Unloaded then return old(self, ...) end
-        if method ~= "FireServer" and method ~= "InvokeServer" then return old(self, ...) end
-
-        local mine = Env.checkcaller and Env.checkcaller()
-        if Spy.active and typeof(self) == "Instance" and not mine then
-            local okName, full = pcall(function() return Util.lower(self:GetFullName()) end)
-            if okName and string.find(full, "trade", 1, true) then
-                pcall(Spy.record, self, method, { ... }, select("#", ...))
-            end
-        end
-        return old(self, ...)
-    end)
-
-    Hook.installed = true
-    return true
 end
 
 ----------------------------------------------------------------------------------
@@ -1479,23 +1001,16 @@ mk("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Left, Parent = titleBar,
 })
 
-local learnedPill = corner(mk("Frame", {
-    Size = UDim2.new(0, 122, 0, 20), Position = UDim2.new(0, 176, 0.5, -10),
+local modePill = corner(mk("Frame", {
+    Size = UDim2.new(0, 104, 0, 20), Position = UDim2.new(0, 176, 0.5, -10),
     BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = titleBar,
 }), 10)
-local learnedStroke = stroke(learnedPill, THEME.warn, 1, 0.3)
-local learnedLabel = mk("TextLabel", {
+stroke(modePill, THEME.good, 1, 0.3)
+mk("TextLabel", {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-    Font = Enum.Font.GothamBold, Text = "trade non appris", TextSize = 10,
-    TextColor3 = THEME.warn, Parent = learnedPill,
+    Font = Enum.Font.GothamBold, Text = "lecture seule", TextSize = 10,
+    TextColor3 = THEME.good, Parent = modePill,
 })
-
-function UI.setLearned()
-    local ok = Spy and Spy.templates and Spy.templates.invite
-    learnedLabel.Text = ok and "trade appris" or "trade non appris"
-    learnedLabel.TextColor3 = ok and THEME.good or THEME.warn
-    learnedStroke.Color = ok and THEME.good or THEME.warn
-end
 
 local function circleButton(offsetX, color, symbol, callback)
     local b = corner(mk("TextButton", {
@@ -1927,30 +1442,21 @@ local scanBase, refreshPlayers
 ----------------------------------------------------------------------------------
 local pagePlayers = addTab("Joueurs")
 
-local cardTarget = card(pagePlayers, "Cible")
+local cardTarget = card(pagePlayers, "Cible",
+    "le hub regarde, il ne fait rien a ta place : va au trade et a la base toi-meme")
 local targetField = field(cardTarget, "pseudo ou UserId...")
 local rowTarget = rowOf(cardTarget, 36)
-btn(rowTarget, { text = "ENVOYER LE TRADE", width = 200, height = 36, style = "primary",
+btn(rowTarget, { text = "VOIR SA BASE", width = 180, height = 36, style = "primary",
     callback = function()
-        setStatus("envoi de la demande...", THEME.warn)
-        local ok, msg = Trade.invite(targetField.Text)
-        setStatus(msg, ok and THEME.good or THEME.bad)
-        if ok then notify("Trade", msg, 4) end
+        local plr, err = PlayerUtil.byQuery(targetField.Text)
+        if not plr then setStatus(err or "joueur introuvable", THEME.bad) return end
+        scanBase(plr)
     end })
-btn(rowTarget, { text = "Aller a sa base", width = 140, height = 36, callback = function()
+btn(rowTarget, { text = "Copier le pseudo", width = 160, height = 36, callback = function()
     local plr, err = PlayerUtil.byQuery(targetField.Text)
     if not plr then setStatus(err or "joueur introuvable", THEME.bad) return end
-    setStatus("deplacement vers " .. plr.Name .. "...", THEME.warn)
-    local ok, e = TP.toBase(plr)
-    setStatus(ok and ("arrive chez " .. plr.Name) or tostring(e), ok and THEME.good or THEME.bad)
-end })
-btn(rowTarget, { text = "Retour", width = 84, height = 36, callback = function()
-    local ok, e = TP.back()
-    setStatus(ok and "retour effectue" or tostring(e), ok and THEME.good or THEME.bad)
-end })
-btn(rowTarget, { text = "Stop", width = 66, height = 36, style = "danger", callback = function()
-    TP.stop()
-    setStatus("deplacement arrete", THEME.warn)
+    setStatus(Util.copy(plr.Name) and ("pseudo copie : " .. plr.Name)
+        or "presse-papier indisponible", THEME.good)
 end })
 
 local cardList = card(pagePlayers, "Joueurs du serveur")
@@ -1990,21 +1496,12 @@ local function playerRow(scroll, plr)
         BackgroundTransparency = 1, Parent = row,
     })
     listLayout(actions, 5, true)
-    btn(actions, { text = "Base", width = 56, height = 30, callback = function()
-        setStatus("deplacement vers la base de " .. plr.Name .. "...", THEME.warn)
-        local ok, e = TP.toBase(plr)
-        setStatus(ok and ("arrive chez " .. plr.Name) or tostring(e),
-            ok and THEME.good or THEME.bad)
+    btn(actions, { text = "VOIR LA BASE", width = 118, height = 30, style = "primary",
+        callback = function() scanBase(plr) end })
+    btn(actions, { text = "Copier", width = 72, height = 30, callback = function()
+        setStatus(Util.copy(plr.Name) and ("pseudo copie : " .. plr.Name)
+            or "presse-papier indisponible", THEME.good)
     end })
-    btn(actions, { text = "Voir", width = 52, height = 30, callback = function()
-        scanBase(plr)
-    end })
-    btn(actions, { text = "TRADE", width = 74, height = 30, style = "primary",
-        callback = function()
-            setStatus("envoi de la demande a " .. plr.Name .. "...", THEME.warn)
-            local ok, msg = Trade.invite(tostring(plr.UserId))
-            setStatus(msg, ok and THEME.good or THEME.bad)
-        end })
     return row
 end
 
@@ -2134,20 +1631,27 @@ switch(cardTrad, "Traduire les messages recus", "TranslateIncoming")
 switch(cardTrad, "Garder le texte original a cote", "ShowOriginal")
 note(cardTrad, "Pour ecrire traduit, passe par le champ ci-dessous : le hub n'intercepte plus le chat du jeu (ca renvoyait un second remote pour un seul message).", THEME.sub)
 
-local cardConv = card(pageChat, "Conversation")
+local cardConv = card(pageChat, "Conversation",
+    "le hub traduit et copie : c'est toi qui colles dans le chat du jeu")
 local chatPanel = panel(cardConv, 170)
 local chatField = field(cardConv, "ton message en francais...")
 local rowSend = rowOf(cardConv)
-btn(rowSend, { text = "Traduire et envoyer", width = 190, style = "primary", callback = function()
-    local ok, msg = Chat.send(chatField.Text, CONFIG.SendAs)
-    if ok then chatField.Text = "" end
-    setStatus(ok and ("envoye : " .. tostring(msg)) or tostring(msg),
-        ok and THEME.good or THEME.bad)
+
+local function prepareAndReport(text, lang)
+    local ok, msg, copied = Chat.prepare(text, lang)
+    if not ok then setStatus(tostring(msg), THEME.bad) return end
+    if copied then
+        setStatus("copie, colle-le dans le chat : " .. tostring(msg), THEME.good)
+    else
+        setStatus("presse-papier indispo - " .. tostring(msg), THEME.warn)
+    end
+end
+
+btn(rowSend, { text = "Traduire et copier", width = 190, style = "primary", callback = function()
+    prepareAndReport(chatField.Text, CONFIG.SendAs)
 end })
-btn(rowSend, { text = "Envoyer brut", width = 130, callback = function()
-    local ok, msg = Chat.send(chatField.Text, nil)
-    if ok then chatField.Text = "" end
-    setStatus(ok and "envoye" or tostring(msg), ok and THEME.good or THEME.bad)
+btn(rowSend, { text = "Copier brut", width = 130, callback = function()
+    prepareAndReport(chatField.Text, nil)
 end })
 
 local cardPhrases = card(pageChat, "Phrases rapides")
@@ -2156,11 +1660,7 @@ for i = 1, #Translator.phrases, 2 do
     for j = i, math.min(i + 1, #Translator.phrases) do
         local phrase = Translator.phrases[j]
         btn(row, { text = phrase.fr, width = 228, height = 30, textSize = 11,
-            callback = function()
-                local ok, msg = Chat.send(phrase.fr, CONFIG.SendAs)
-                setStatus(ok and ("envoye : " .. tostring(msg)) or tostring(msg),
-                    ok and THEME.good or THEME.bad)
-            end })
+            callback = function() prepareAndReport(phrase.fr, CONFIG.SendAs) end })
     end
 end
 
@@ -2184,23 +1684,11 @@ end
 ----------------------------------------------------------------------------------
 local pageSettings = addTab("Reglages")
 
-local cardMove = card(pageSettings, "Deplacement",
-    "aucun mode n'ecrit de CFrame sur le personnage : rien a voir pour un anti-teleport")
-chips(cardMove, { "physique", "marche" }, "TPMode")
-local speedSlider, setSpeed = slider(cardMove, "Vitesse", "TPSpeed", 16, 250, " studs/s")
-local rowPresets = rowOf(cardMove, 28)
-btn(rowPresets, { text = "Discret 25", width = 118, height = 28, callback = function() setSpeed(25) end })
-btn(rowPresets, { text = "Normal 45", width = 118, height = 28, callback = function() setSpeed(45) end })
-btn(rowPresets, { text = "Rapide 90", width = 118, height = 28, callback = function() setSpeed(90) end })
-slider(cardMove, "Altitude de survol", "TPAltitude", 0, 120, " studs")
-switch(cardMove, "Atterrissage freine (anti degats de chute)", "TPLandSlow")
-note(cardMove, "Le mode CFrame et le noclip ont ete retires : ce sont eux qui declenchaient l'anti-teleport. Tu es renvoye en arriere ? Descends la vitesse a 25-45.", THEME.warn)
-
-local cardLimit = card(pageSettings, "Limiteur de remotes",
-    "un seul appel serveur a la fois, jamais de rafale")
-slider(cardLimit, "Delai entre deux invitations", "InviteCooldown", 1, 30, " s")
-slider(cardLimit, "Delai entre deux messages", "ChatCooldown", 1, 15, " s")
-note(cardLimit, "Un envoi refuse n'est pas mis en file d'attente : il est annule. Monte ces delais si le serveur te repond mal.", THEME.sub)
+local cardMode = card(pageSettings, "Mode lecture seule",
+    "ce que ce hub ne fait pas, et pourquoi")
+note(cardMode, "Aucun FireServer / InvokeServer, aucun deplacement du personnage, aucun hook : le serveur ne recoit rien de ce hub, donc il n'a rien a te reprocher.", THEME.good)
+note(cardMode, "Le vol et le teleport ont ete retires parce qu'ils etaient la cause du kick : le serveur compare ta position d'une frame a l'autre avec ta WalkSpeed. BodyVelocity ou CFrame, la trajectoire reste impossible. Il n'existe pas de version discrete de ca.", THEME.warn)
+note(cardMode, "L'envoi de trade a ete retire pour la meme raison : un remote appele avec des arguments devines fait kick des le premier appel.", THEME.warn)
 
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
@@ -2213,7 +1701,6 @@ btn(rowState, { text = "Recharger les modules", width = 190, callback = function
     Remotes.cache, Chat.remote = {}, nil
     Chat.getRemote()
     Chat.hookIncoming()
-    Hook.install()
     refreshPlayers()
     setStatus("modules recharges", THEME.good)
 end })
@@ -2269,24 +1756,21 @@ end))
 
 local function unload()
     if State.Unloaded then return end
-    State.Unloaded, State.Cancel = true, true
-    clearMover()
+    State.Unloaded = true
     Maid.clean()
     GENV.TradePlazaHub = nil
     print("[TPH] decharge.")
 end
 
 GENV.TradePlazaHub = {
-    Config = CONFIG, State = State, Remotes = Remotes, Plots = Plots, Teleport = TP,
-    Trade = Trade, Chat = Chat, Translator = Translator, Inspector = Inspector,
-    Spy = Spy, Hook = Hook, Limiter = Limiter, Unload = unload,
+    Config = CONFIG, State = State, Remotes = Remotes, Plots = Plots,
+    Chat = Chat, Translator = Translator, Inspector = Inspector, Unload = unload,
 }
 
 ----------------------------------------------------------------------------------
 -- INITIALISATION
 ----------------------------------------------------------------------------------
 UI.select("Joueurs")
-UI.setLearned()
 
 window.Size = UDim2.new(0, WIN_W - 50, 0, WIN_H - 34)
 tween(window, { Size = UDim2.new(0, WIN_W, 0, WIN_H) }, 0.3, Enum.EasingStyle.Back)
@@ -2298,41 +1782,29 @@ Maid.conn(Players.PlayerRemoving:Connect(function()
     if State.Unloaded then return end
     spawnTask(function() waitFor(0.2) pcall(refreshPlayers) end)
 end))
-Maid.conn(LocalPlayer.CharacterAdded:Connect(function()
-    State.Cancel, State.Travelling = true, false
-    clearMover()
-end))
-
 local function init()
-    log("demarrage (executor : %s)", tostring(Env.isExecutor))
-    Hook.install()
+    log("demarrage lecture seule (executor : %s)", tostring(Env.isExecutor))
     Chat.getRemote()
     Chat.hookIncoming()
     if CONFIG.PatchChatGui then Chat.patchGui() end
 
     refreshPlayers()
 
-    local candidates = Trade.candidates()
     local httpOk = Util.httpGet(
         "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=test") ~= nil
 
     infoNote.Text = table.concat({
         "Touche du menu       : " .. tostring(CONFIG.Keybind.Name),
+        "Mode                 : lecture seule (0 appel serveur, 0 deplacement)",
         "Executor detecte     : " .. (Env.isExecutor and "oui" or "non"),
-        "Apprentissage trade  : " .. (Hook.installed and "actif" or "indisponible (hookmetamethod absent)"),
-        "Remotes de trade     : " .. tostring(#candidates)
-            .. (candidates[1] and ("  (" .. candidates[1].Name .. ")") or ""),
-        "Remote de chat       : " .. (Chat.remote and Chat.remote.Name or "introuvable"),
-        "Limiteur remotes     : " .. string.format("%.1fs global / %.1fs par remote",
-            tonumber(CONFIG.RemoteMinGap) or 0.8, tonumber(CONFIG.RemoteCooldown) or 1.5),
-        "Mode de deplacement  : " .. tostring(CONFIG.TPMode) .. " (CFrame retire)",
-        "Traduction en ligne  : " .. (httpOk and "operationnelle" or "indispo (phrases rapides seulement)"),
+        "Chat ecoute          : " .. (Chat.remote and Chat.remote.Name or "aucun remote trouve"),
+        "Traduction en ligne  : " .. (httpOk and "operationnelle" or "indispo (phrases hors-ligne seulement)"),
         "Bases detectees      : " .. tostring(#Plots:All()),
         "API console          : getgenv().TradePlazaHub",
     }, "\n")
 
-    setStatus("pret - " .. tostring(CONFIG.Keybind.Name) .. " pour cacher", THEME.good)
-    notify("Trade Plaza Hub v3", "Charge. " .. tostring(CONFIG.Keybind.Name) .. " pour afficher/cacher.", 5)
+    setStatus("pret (lecture seule) - " .. tostring(CONFIG.Keybind.Name) .. " pour cacher", THEME.good)
+    notify("Trade Plaza Hub", "Charge en lecture seule. " .. tostring(CONFIG.Keybind.Name) .. " pour afficher/cacher.", 5)
 end
 
 spawnTask(function()
