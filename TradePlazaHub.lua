@@ -65,6 +65,7 @@ local CONFIG = {
     -- affichage
     ShowAvatars  = true,
     ShowModels   = true,
+    ModelSize    = 110,         -- taille de l'apercu 3D des brainrots (px)
 
     RemotePaths  = {},
 }
@@ -698,7 +699,7 @@ end
 ----------------------------------------------------------------------------------
 -- CHAT DE TRADE
 ----------------------------------------------------------------------------------
-local Chat = { remote = nil, patched = {} }
+local Chat = { remote = nil, seen = {}, written = {}, boxes = {} }
 
 local function pushChat(who, original, translated)
     local entry = { who = who, original = original, translated = translated, at = os.date("%H:%M") }
@@ -764,35 +765,121 @@ function Chat.hookIncoming()
     end))
 end
 
+-- mots d'interface a ne pas traduire (boutons, entetes)
+local UI_WORDS = {
+    send = true, sent = true, accept = true, accepted = true, decline = true,
+    cancel = true, close = true, trade = true, chat = true, ok = true,
+    yes = true, no = true, ready = true, waiting = true, back = true,
+    ["trade chat"] = true, ["type here..."] = true,
+}
+
+-- un label est sur le chemin du chat si son nom complet contient "chat" OU
+-- "trade" (l'ancien filtre exigeait les DEUX, c'est pour ca que rien n'etait
+-- traduit : dans la plupart des jeux le ScreenGui s'appelle juste "TradeGui"
+-- ou "ChatFrame", pas les deux a la fois)
+local function onChatPath(inst)
+    local ok, full = pcall(function() return Util.lower(inst:GetFullName()) end)
+    if not ok then return false end
+    return string.find(full, "chat", 1, true) ~= nil
+        or string.find(full, "trade", 1, true) ~= nil
+end
+
+local function looksLikeMessage(text)
+    local t = Util.trim(text or "")
+    if #t < 2 or #t > 240 then return false end
+    if tonumber(t) then return false end
+    if UI_WORDS[Util.lower(t)] then return false end
+    return true
+end
+
+-- traduit un TextLabel et se rebranche sur ses changements de texte : les
+-- jeux reutilisent les memes labels quand le chat defile, l'ancienne version
+-- ne traduisait donc que le tout premier message de chaque ligne
+local function handleLabel(label)
+    if State.Unloaded then return end
+    if not (CONFIG.PatchChatGui and CONFIG.TranslateIncoming) then return end
+    local original = Util.trim(label.Text or "")
+    if not looksLikeMessage(original) then return end
+    if Chat.written[label] == original then return end   -- notre propre ecriture
+    if Chat.seen[label] == original then return end      -- deja traite
+    Chat.seen[label] = original
+
+    spawnTask(function()
+        local out, detected = Translator.translate(original, CONFIG.TranslateTo)
+        if State.Unloaded or not label.Parent then return end
+        if not out then return end
+        pushChat("chat/" .. tostring(detected), original, (out ~= original) and out or nil)
+        if out == original then return end
+        local final = CONFIG.ShowOriginal and (original .. "  |  " .. out) or out
+        Chat.written[label] = final
+        pcall(function() label.Text = final end)
+    end)
+end
+
+-- ce que TU tapes dans le chat du jeu : on le lit dans la TextBox et on
+-- l'affiche dans l'onglet Chat du hub. Lecture pure, rien n'est envoye.
+local function watchBox(box)
+    if Chat.boxes[box] then return end
+    Chat.boxes[box] = true
+    local lastTyped = ""
+    Maid.conn(box:GetPropertyChangedSignal("Text"):Connect(function()
+        local t = Util.trim(box.Text or "")
+        if t ~= "" then lastTyped = t end
+    end))
+    Maid.conn(box.FocusLost:Connect(function(enter)
+        if State.Unloaded or not enter then return end
+        local txt = Util.trim(box.Text or "")
+        if txt == "" then txt = lastTyped end
+        lastTyped = ""
+        if not looksLikeMessage(txt) then return end
+        spawnTask(function()
+            local out = Translator.translate(txt, CONFIG.TranslateTo)
+            pushChat("moi", txt, (out and out ~= txt) and out or nil)
+        end)
+    end))
+end
+
+local function handleAny(inst)
+    if not onChatPath(inst) then return end
+    if inst:IsA("TextLabel") then
+        if not Chat.seen[inst] then
+            Maid.conn(inst:GetPropertyChangedSignal("Text"):Connect(function()
+                handleLabel(inst)
+            end))
+        end
+        handleLabel(inst)
+    elseif inst:IsA("TextBox") then
+        watchBox(inst)
+    end
+end
+
 function Chat.patchGui()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
 
-    local function handle(label)
-        if not (CONFIG.PatchChatGui and CONFIG.TranslateIncoming) then return end
-        if not label:IsA("TextLabel") or Chat.patched[label] then return end
-        local full = Util.lower(label:GetFullName())
-        if not (string.find(full, "trade", 1, true) and string.find(full, "chat", 1, true)) then
-            return
-        end
-        local original = Util.trim(label.Text or "")
-        if #original < 2 then return end
-        Chat.patched[label] = true
-        spawnTask(function()
-            local out, detected = Translator.translate(original, CONFIG.TranslateTo)
-            if not out or out == original or State.Unloaded or not label.Parent then return end
-            label.Text = CONFIG.ShowOriginal and (original .. "  |  " .. out) or out
-            pushChat("chat/" .. tostring(detected), original, out)
-        end)
-    end
-
     Maid.conn(pg.DescendantAdded:Connect(function(d)
-        if State.Unloaded or not d:IsA("TextLabel") then return end
-        spawnTask(function() waitFor(0.15) handle(d) end)
+        if State.Unloaded then return end
+        if not (d:IsA("TextLabel") or d:IsA("TextBox")) then return end
+        spawnTask(function() waitFor(0.15) pcall(handleAny, d) end)
     end))
     for _, d in ipairs(pg:GetDescendants()) do
-        if d:IsA("TextLabel") then handle(d) end
+        if d:IsA("TextLabel") or d:IsA("TextBox") then pcall(handleAny, d) end
     end
+end
+
+-- relance un balayage complet (bouton "Rescanner le chat")
+function Chat.rescan()
+    Chat.seen, Chat.written = {}, {}
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return 0 end
+    local n = 0
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextBox") then
+            if onChatPath(d) then n = n + 1 end
+            pcall(handleAny, d)
+        end
+    end
+    return n
 end
 
 ----------------------------------------------------------------------------------
@@ -897,7 +984,7 @@ end
 
 -- apercu 3D d'un brainrot (le vrai modele du jeu, rendu dans un ViewportFrame)
 local function modelIcon(parent, model, size)
-    size = size or 44
+    size = size or tonumber(CONFIG.ModelSize) or 110
     local holder = corner(mk("Frame", {
         Size = UDim2.new(0, size, 0, size), BackgroundColor3 = THEME.surface,
         BorderSizePixel = 0, ClipsDescendants = true, Parent = parent,
@@ -906,7 +993,8 @@ local function modelIcon(parent, model, size)
 
     local fallback = mk("TextLabel", {
         Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, Text = "?", TextSize = 16,
+        Font = Enum.Font.GothamBold, Text = "?",
+        TextSize = math.max(14, math.floor(size / 3)),
         TextColor3 = THEME.sub, Parent = holder,
     })
     if not (CONFIG.ShowModels and model) then return holder end
@@ -935,7 +1023,9 @@ local function modelIcon(parent, model, size)
 
             local center, extents = clone:GetBoundingBox()
             local radius = math.max(extents.Magnitude, 4)
-            local offset = Vector3.new(radius * 0.75, radius * 0.45, radius * 0.85)
+            -- cadrage serre : le modele remplit la vignette au lieu de flotter
+            local offset = Vector3.new(radius * 0.52, radius * 0.30, radius * 0.60)
+            camera.FieldOfView = 45
             camera.CFrame = CFrame.new(center.Position + offset, center.Position)
             fallback.Visible = false
         end)
@@ -972,7 +1062,7 @@ local screen = mk("ScreenGui", {
 Maid.inst(screen)
 if syn and syn.protect_gui then pcall(syn.protect_gui, screen) end
 
-local WIN_W, WIN_H = 690, 480
+local WIN_W, WIN_H = 560, 400
 
 local window = corner(mk("Frame", {
     Size = UDim2.new(0, WIN_W, 0, WIN_H),
@@ -1037,14 +1127,14 @@ local bodyFrame = mk("Frame", {
 })
 
 local sidebar = mk("Frame", {
-    Size = UDim2.new(0, 148, 1, 0), BackgroundColor3 = THEME.surface,
+    Size = UDim2.new(0, 112, 1, 0), BackgroundColor3 = THEME.surface,
     BorderSizePixel = 0, Parent = bodyFrame,
 })
 listLayout(sidebar, 4)
 pad(sidebar, 10)
 
 local contentArea = mk("Frame", {
-    Size = UDim2.new(1, -148, 1, 0), Position = UDim2.new(0, 148, 0, 0),
+    Size = UDim2.new(1, -112, 1, 0), Position = UDim2.new(0, 112, 0, 0),
     BackgroundTransparency = 1, Parent = bodyFrame,
 })
 
@@ -1310,7 +1400,7 @@ local function chips(parent, values, key, callback)
     return holder
 end
 
-local function slider(parent, text, key, minVal, maxVal, suffix)
+local function slider(parent, text, key, minVal, maxVal, suffix, onChange)
     local holder = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, Parent = parent,
     })
@@ -1365,7 +1455,14 @@ local function slider(parent, text, key, minVal, maxVal, suffix)
     end))
     Maid.conn(UserInputService.InputEnded:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+        or i.UserInputType == Enum.UserInputType.Touch then
+            local was = dragging
+            dragging = false
+            -- on ne previent qu'au relachement, pas a chaque frame du drag
+            if was and onChange then
+                spawnTask(function() pcall(onChange, CONFIG[key]) end)
+            end
+        end
     end))
     return holder, setValue
 end
@@ -1442,25 +1539,9 @@ local scanBase, refreshPlayers
 ----------------------------------------------------------------------------------
 local pagePlayers = addTab("Joueurs")
 
-local cardTarget = card(pagePlayers, "Cible",
-    "le hub regarde, il ne fait rien a ta place : va au trade et a la base toi-meme")
-local targetField = field(cardTarget, "pseudo ou UserId...")
-local rowTarget = rowOf(cardTarget, 36)
-btn(rowTarget, { text = "VOIR SA BASE", width = 180, height = 36, style = "primary",
-    callback = function()
-        local plr, err = PlayerUtil.byQuery(targetField.Text)
-        if not plr then setStatus(err or "joueur introuvable", THEME.bad) return end
-        scanBase(plr)
-    end })
-btn(rowTarget, { text = "Copier le pseudo", width = 160, height = 36, callback = function()
-    local plr, err = PlayerUtil.byQuery(targetField.Text)
-    if not plr then setStatus(err or "joueur introuvable", THEME.bad) return end
-    setStatus(Util.copy(plr.Name) and ("pseudo copie : " .. plr.Name)
-        or "presse-papier indisponible", THEME.good)
-end })
-
-local cardList = card(pagePlayers, "Joueurs du serveur")
-local playersPanel = panel(cardList, 250)
+local cardList = card(pagePlayers, "Joueurs du serveur",
+    "clique sur un joueur pour voir sa base")
+local playersPanel = panel(cardList, 300)
 btn(cardList, { text = "Rafraichir", callback = function()
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
@@ -1477,14 +1558,14 @@ local function playerRow(scroll, plr)
     head.Position = UDim2.new(0, 8, 0.5, -17)
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -210, 0, 15), Position = UDim2.new(0, 50, 0, 8),
+        Size = UDim2.new(1, -146, 0, 15), Position = UDim2.new(0, 50, 0, 8),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = plr.DisplayName ~= "" and plr.DisplayName or plr.Name, TextSize = 12,
         TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, -210, 0, 13), Position = UDim2.new(0, 50, 0, 25),
+        Size = UDim2.new(1, -146, 0, 13), Position = UDim2.new(0, 50, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
         Text = "@" .. plr.Name .. "   -   " .. plr.UserId, TextSize = 10,
         TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
@@ -1492,16 +1573,12 @@ local function playerRow(scroll, plr)
     })
 
     local actions = mk("Frame", {
-        Size = UDim2.new(0, 196, 0, 30), Position = UDim2.new(1, -204, 0.5, -15),
+        Size = UDim2.new(0, 126, 0, 30), Position = UDim2.new(1, -134, 0.5, -15),
         BackgroundTransparency = 1, Parent = row,
     })
     listLayout(actions, 5, true)
-    btn(actions, { text = "VOIR LA BASE", width = 118, height = 30, style = "primary",
+    btn(actions, { text = "VOIR LA BASE", width = 126, height = 30, style = "primary",
         callback = function() scanBase(plr) end })
-    btn(actions, { text = "Copier", width = 72, height = 30, callback = function()
-        setStatus(Util.copy(plr.Name) and ("pseudo copie : " .. plr.Name)
-            or "presse-papier indisponible", THEME.good)
-    end })
     return row
 end
 
@@ -1524,15 +1601,11 @@ end
 ----------------------------------------------------------------------------------
 local pageBase = addTab("Base")
 
-local cardScan = card(pageBase, "Scanner une base")
-local baseField = field(cardScan, "pseudo ou UserId...")
+local cardScan = card(pageBase, "Base affichee",
+    "passe par l'onglet Joueurs pour choisir une base")
 local rowScan = rowOf(cardScan)
-btn(rowScan, { text = "Scanner sa base", width = 150, style = "primary", callback = function()
-    local plr, err = PlayerUtil.byQuery(baseField.Text)
-    if not plr then setStatus(err or "joueur introuvable", THEME.bad) return end
-    scanBase(plr)
-end })
-btn(rowScan, { text = "Ma base", width = 96, callback = function() scanBase(LocalPlayer) end })
+btn(rowScan, { text = "Ma base", width = 110, style = "primary",
+    callback = function() scanBase(LocalPlayer) end })
 btn(rowScan, { text = "Copier la structure", width = 160, callback = function()
     if not State.Plot then setStatus("scanne d'abord une base", THEME.bad) return end
     local dump = Inspector.dump(State.Plot, 400)
@@ -1542,27 +1615,32 @@ end })
 local baseSummary = note(cardScan, "aucune base scannee", THEME.text)
 
 local cardBrainrots = card(pageBase, "Brainrots")
-local brainrotPanel = panel(cardBrainrots, 260)
+local brainrotPanel = panel(cardBrainrots, 300)
 
+-- une ligne = une grande vignette 3D a gauche, les infos empilees a droite
 local function brainrotRow(scroll, entry)
+    local size    = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
+    local textX   = size + 18
+    local rowH    = math.max(size, 96) + 14
+
     local row = corner(mk("Frame", {
-        Size = UDim2.new(1, -6, 0, 58), BackgroundColor3 = THEME.card,
+        Size = UDim2.new(1, -6, 0, rowH), BackgroundColor3 = THEME.card,
         BackgroundTransparency = 0.2, BorderSizePixel = 0, Parent = scroll,
     }), 8)
     stroke(row, THEME.line, 1, 0.65)
 
-    local icon = modelIcon(row, entry.model, 44)
-    icon.Position = UDim2.new(0, 7, 0.5, -22)
+    local icon = modelIcon(row, entry.model, size)
+    icon.Position = UDim2.new(0, 8, 0.5, -math.floor(size / 2))
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -200, 0, 16), Position = UDim2.new(0, 60, 0, 8),
+        Size = UDim2.new(1, -textX - 10, 0, 18), Position = UDim2.new(0, textX, 0, 12),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = entry.name,
-        TextSize = 12, TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
+        TextSize = 14, TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
     local tags = mk("Frame", {
-        Size = UDim2.new(1, -200, 0, 18), Position = UDim2.new(0, 60, 0, 30),
+        Size = UDim2.new(1, -textX - 10, 0, 18), Position = UDim2.new(0, textX, 0, 36),
         BackgroundTransparency = 1, Parent = row,
     })
     listLayout(tags, 5, true)
@@ -1571,18 +1649,18 @@ local function brainrotRow(scroll, entry)
     if entry.rarity then tag(tags, entry.rarity, THEME.accent) end
 
     mk("TextLabel", {
-        Size = UDim2.new(0, 130, 0, 18), Position = UDim2.new(1, -138, 0, 11),
+        Size = UDim2.new(1, -textX - 10, 0, 20), Position = UDim2.new(0, textX, 0, 62),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = entry.income > 0 and ("$" .. Util.short(entry.income) .. "/s") or "-",
-        TextSize = 13, TextColor3 = THEME.accent2,
-        TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+        TextSize = 16, TextColor3 = THEME.accent2,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
     })
     if entry.count > 1 and entry.total > 0 then
         mk("TextLabel", {
-            Size = UDim2.new(0, 130, 0, 14), Position = UDim2.new(1, -138, 0, 30),
+            Size = UDim2.new(1, -textX - 10, 0, 14), Position = UDim2.new(0, textX, 0, 84),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-            Text = "total $" .. Util.short(entry.total) .. "/s", TextSize = 10,
-            TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+            Text = "total $" .. Util.short(entry.total) .. "/s", TextSize = 11,
+            TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
         })
     end
     return row
@@ -1618,6 +1696,11 @@ scanBase = function(player, model, ownerName)
     setStatus("base de " .. ownerName .. " scannee : " .. count .. " brainrots", THEME.good)
 end
 
+-- re-affiche la base courante (apres un changement de taille de vignette)
+local function redrawBase()
+    if State.Plot then scanBase(nil, State.Plot, State.PlotOwner) end
+end
+
 ----------------------------------------------------------------------------------
 -- ONGLET : CHAT
 ----------------------------------------------------------------------------------
@@ -1629,7 +1712,13 @@ cycleButton(rowLangs, "Je lis en :", LANGS, "TranslateTo", 168)
 cycleButton(rowLangs, "J'ecris en :", LANGS, "SendAs", 168)
 switch(cardTrad, "Traduire les messages recus", "TranslateIncoming")
 switch(cardTrad, "Garder le texte original a cote", "ShowOriginal")
-note(cardTrad, "Pour ecrire traduit, passe par le champ ci-dessous : le hub n'intercepte plus le chat du jeu (ca renvoyait un second remote pour un seul message).", THEME.sub)
+btn(cardTrad, { text = "Rescanner le chat du jeu", callback = function()
+    local n = Chat.rescan()
+    setStatus(n > 0 and (n .. " element(s) de chat trouve(s), traduction relancee")
+        or "aucun chat trouve dans PlayerGui - ouvre le chat du jeu puis reclique",
+        n > 0 and THEME.good or THEME.warn)
+end })
+note(cardTrad, "Le hub lit le chat du jeu et le traduit sur place. Ce que tu tapes toi-meme apparait aussi ci-dessous des que tu valides. Si rien ne se traduit : ouvre le chat du jeu, puis clique sur Rescanner.", THEME.sub)
 
 local cardConv = card(pageChat, "Conversation",
     "le hub traduit et copie : c'est toi qui colles dans le chat du jeu")
@@ -1693,6 +1782,10 @@ note(cardMode, "L'envoi de trade a ete retire pour la meme raison : un remote ap
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
+slider(cardDisplay, "Taille de l'apercu 3D", "ModelSize", 48, 220, " px", function()
+    redrawBase()
+end)
+note(cardDisplay, "La taille s'applique au relachement du curseur : la base affichee est redessinee toute seule.", THEME.sub)
 
 local cardState = card(pageSettings, "Etat")
 local infoNote = note(cardState, "...", THEME.text)
