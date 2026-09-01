@@ -62,6 +62,13 @@ local CONFIG = {
     ShowOriginal      = true,
     PatchChatGui      = true,
 
+    -- Chemin exact du cadre de chat, relatif a PlayerGui. Renseigne pour
+    -- Trade Live Trade : PlayerGui.TradeLiveTrade.TradeLiveTrade.Chat
+    -- (contient NormalChat/ChatBox et RestrictedChat). Tout ce qui est dans
+    -- ce cadre est traite comme du chat, sans heuristique.
+    -- Mets "" pour revenir a la detection par mot-cle.
+    ChatGuiPath       = "TradeLiveTrade.TradeLiveTrade.Chat",
+
     -- affichage
     ShowAvatars  = true,
     ShowModels   = true,
@@ -699,7 +706,8 @@ end
 ----------------------------------------------------------------------------------
 -- CHAT DE TRADE
 ----------------------------------------------------------------------------------
-local Chat = { remote = nil, seen = {}, written = {}, boxes = {} }
+local Chat = { remote = nil, rootInst = nil, seen = {}, written = {},
+               boxes = {}, listened = {} }
 
 local function pushChat(who, original, translated)
     local entry = { who = who, original = original, translated = translated, at = os.date("%H:%M") }
@@ -750,69 +758,132 @@ local function extractMessage(...)
     return sender, message
 end
 
+-- On s'abonne a TOUS les remotes de chat trouves, pas seulement au premier :
+-- ce jeu en a deux (TradeService/SendChatMessage et ChatService/ChatMessage)
+-- et les messages du Trade Chat ne passent pas forcement par le meme que le
+-- chat general. Abonnement seul : OnClientEvent est ce que le serveur nous
+-- envoie, rien ne part dans l'autre sens.
 function Chat.hookIncoming()
-    local remote = Chat.getRemote()
-    if not remote or not remote:IsA("RemoteEvent") then return end
-    Maid.conn(remote.OnClientEvent:Connect(function(...)
-        if State.Unloaded or not CONFIG.TranslateIncoming then return end
-        local sender, message = extractMessage(...)
-        if not message or sender == LocalPlayer then return end
-        spawnTask(function()
-            local out = Translator.translate(message, CONFIG.TranslateTo)
-            pushChat(sender and sender.Name or "eux", message, out)
-            if out and out ~= message then notify(sender and sender.Name or "Trade", out, 6) end
-        end)
-    end))
+    local names = {}
+    for _, d in ipairs(allRemotes()) do
+        local okName, full = pcall(function() return Util.lower(d:GetFullName()) end)
+        if okName and d:IsA("RemoteEvent") and not Chat.listened[d]
+        and (string.find(full, "chatmessage", 1, true)
+          or string.find(full, "chatservice", 1, true)
+          or string.find(full, "sendmessage", 1, true)) then
+            Chat.listened[d] = true
+            Chat.remote = Chat.remote or d
+            table.insert(names, d:GetFullName())
+            Maid.conn(d.OnClientEvent:Connect(function(...)
+                if State.Unloaded or not CONFIG.TranslateIncoming then return end
+                local sender, message = extractMessage(...)
+                if not message or sender == LocalPlayer then return end
+                spawnTask(function()
+                    local out = Translator.translate(message, CONFIG.TranslateTo)
+                    pushChat(sender and sender.Name or "eux", message, out)
+                    if out and out ~= message then
+                        notify(sender and sender.Name or "Trade", out, 6)
+                    end
+                end)
+            end))
+        end
+    end
+    for _, n in ipairs(names) do log("chat ecoute : %s", n) end
+    return names
 end
 
--- mots d'interface a ne pas traduire (boutons, entetes)
+-- mots d'interface a ne pas traduire (boutons, entetes, placeholders)
 local UI_WORDS = {
     send = true, sent = true, accept = true, accepted = true, decline = true,
     cancel = true, close = true, trade = true, chat = true, ok = true,
     yes = true, no = true, ready = true, waiting = true, back = true,
-    ["trade chat"] = true, ["type here..."] = true,
+    ["trade chat"] = true, ["type here..."] = true, ["type here"] = true,
+    ["normal chat"] = true, ["restricted chat"] = true, ["live trade"] = true,
 }
 
--- un label est sur le chemin du chat si son nom complet contient "chat" OU
--- "trade" (l'ancien filtre exigeait les DEUX, c'est pour ca que rien n'etait
--- traduit : dans la plupart des jeux le ScreenGui s'appelle juste "TradeGui"
--- ou "ChatFrame", pas les deux a la fois)
+-- Cadre de chat cible. On resout CONFIG.ChatGuiPath sous PlayerGui : pour ce
+-- jeu c'est PlayerGui.TradeLiveTrade.TradeLiveTrade.Chat, qui contient
+-- NormalChat (avec ChatBox) et RestrictedChat. Quand ce cadre est trouve,
+-- TOUT ce qu'il contient est traite comme du chat, sans heuristique de nom :
+-- c'est ce qui garantit que chaque message ecrit par quelqu'un est detecte.
+-- Si le chemin n'existe pas, on retombe sur la detection par mot-cle.
+function Chat.root()
+    if Chat.rootInst and Chat.rootInst.Parent then return Chat.rootInst, true end
+    Chat.rootInst = nil
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil, false end
+    local path = Util.trim(CONFIG.ChatGuiPath or "")
+    if path ~= "" then
+        local node = pg
+        for part in string.gmatch(path, "[^%.]+") do
+            node = node and node:FindFirstChild(part)
+        end
+        if node then
+            Chat.rootInst = node
+            return node, true
+        end
+    end
+    return pg, false
+end
+
 local function onChatPath(inst)
-    local ok, full = pcall(function() return Util.lower(inst:GetFullName()) end)
-    if not ok then return false end
+    local root, exact = Chat.root()
+    if exact and root then
+        local ok, inside = pcall(function() return inst:IsDescendantOf(root) end)
+        if ok and inside then return true end
+        return false
+    end
+    local ok2, full = pcall(function() return Util.lower(inst:GetFullName()) end)
+    if not ok2 then return false end
     return string.find(full, "chat", 1, true) ~= nil
         or string.find(full, "trade", 1, true) ~= nil
 end
 
+-- certains jeux affichent les messages en RichText : on enleve les balises
+-- avant de traduire, sinon Google traduit le balisage
+local function plainText(obj)
+    local ok, t = pcall(function() return obj.Text end)
+    if not ok or type(t) ~= "string" then return "" end
+    local rich = false
+    pcall(function() rich = obj.RichText end)
+    if rich and string.find(t, "<", 1, true) then
+        t = string.gsub(t, "<[^<>]->", "")
+    end
+    return Util.trim(t)
+end
+
+-- un caractere suffit : dans ce jeu un message peut etre juste "P"
 local function looksLikeMessage(text)
     local t = Util.trim(text or "")
-    if #t < 2 or #t > 240 then return false end
+    if #t < 1 or #t > 240 then return false end
     if tonumber(t) then return false end
     if UI_WORDS[Util.lower(t)] then return false end
     return true
 end
 
--- traduit un TextLabel et se rebranche sur ses changements de texte : les
--- jeux reutilisent les memes labels quand le chat defile, l'ancienne version
--- ne traduisait donc que le tout premier message de chaque ligne
-local function handleLabel(label)
+-- traduit un TextLabel ou un TextButton et se rebranche sur ses changements
+-- de texte : les jeux reutilisent les memes lignes quand le chat defile
+local function handleText(obj)
     if State.Unloaded then return end
     if not (CONFIG.PatchChatGui and CONFIG.TranslateIncoming) then return end
-    local original = Util.trim(label.Text or "")
+    local original = plainText(obj)
     if not looksLikeMessage(original) then return end
-    if Chat.written[label] == original then return end   -- notre propre ecriture
-    if Chat.seen[label] == original then return end      -- deja traite
-    Chat.seen[label] = original
+    if Chat.written[obj] == original then return end   -- notre propre ecriture
+    if Chat.seen[obj] == original then return end      -- deja traite
+    Chat.seen[obj] = original
 
     spawnTask(function()
         local out, detected = Translator.translate(original, CONFIG.TranslateTo)
-        if State.Unloaded or not label.Parent then return end
-        if not out then return end
+        if State.Unloaded or not obj.Parent then return end
+        if not out then
+            log("traduction indisponible pour \"%s\"", original)
+            return
+        end
         pushChat("chat/" .. tostring(detected), original, (out ~= original) and out or nil)
         if out == original then return end
         local final = CONFIG.ShowOriginal and (original .. "  |  " .. out) or out
-        Chat.written[label] = final
-        pcall(function() label.Text = final end)
+        Chat.written[obj] = final
+        pcall(function() obj.Text = final end)
     end)
 end
 
@@ -839,47 +910,70 @@ local function watchBox(box)
     end))
 end
 
+local function isTextDisplay(inst)
+    return inst:IsA("TextLabel") or inst:IsA("TextButton")
+end
+
 local function handleAny(inst)
     if not onChatPath(inst) then return end
-    if inst:IsA("TextLabel") then
-        if not Chat.seen[inst] then
+    if isTextDisplay(inst) then
+        if Chat.seen[inst] == nil then
             Maid.conn(inst:GetPropertyChangedSignal("Text"):Connect(function()
-                handleLabel(inst)
+                handleText(inst)
             end))
         end
-        handleLabel(inst)
+        handleText(inst)
     elseif inst:IsA("TextBox") then
         watchBox(inst)
+        -- la zone de saisie affiche aussi le texte de l'autre dans certains
+        -- jeux : on la traite en lecture comme un label
+        handleText(inst)
     end
+end
+
+local function isTextThing(inst)
+    return isTextDisplay(inst) or inst:IsA("TextBox")
 end
 
 function Chat.patchGui()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
 
+    -- on ecoute PlayerGui en entier : le cadre de chat peut etre cree apres
+    -- le chargement du hub, et onChatPath filtre a l'arrivee
     Maid.conn(pg.DescendantAdded:Connect(function(d)
-        if State.Unloaded then return end
-        if not (d:IsA("TextLabel") or d:IsA("TextBox")) then return end
+        if State.Unloaded or not isTextThing(d) then return end
         spawnTask(function() waitFor(0.15) pcall(handleAny, d) end)
     end))
     for _, d in ipairs(pg:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextBox") then pcall(handleAny, d) end
+        if isTextThing(d) then pcall(handleAny, d) end
+    end
+
+    local root, exact = Chat.root()
+    if exact and root then
+        log("cadre de chat trouve : %s", root:GetFullName())
+    else
+        log("cadre de chat '%s' introuvable - detection par mot-cle",
+            tostring(CONFIG.ChatGuiPath))
     end
 end
 
 -- relance un balayage complet (bouton "Rescanner le chat")
+-- retourne : elements de chat trouves, chemin du cadre, chemin exact ?
 function Chat.rescan()
-    Chat.seen, Chat.written = {}, {}
+    Chat.seen, Chat.written, Chat.rootInst = {}, {}, nil
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return 0 end
+    if not pg then return 0, "PlayerGui absent", false end
+    local root, exact = Chat.root()
     local n = 0
     for _, d in ipairs(pg:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextBox") then
+        if isTextThing(d) then
             if onChatPath(d) then n = n + 1 end
             pcall(handleAny, d)
         end
     end
-    return n
+    Chat.hookIncoming()
+    return n, (root and root:GetFullName() or "?"), exact
 end
 
 ----------------------------------------------------------------------------------
@@ -1712,13 +1806,16 @@ cycleButton(rowLangs, "Je lis en :", LANGS, "TranslateTo", 168)
 cycleButton(rowLangs, "J'ecris en :", LANGS, "SendAs", 168)
 switch(cardTrad, "Traduire les messages recus", "TranslateIncoming")
 switch(cardTrad, "Garder le texte original a cote", "ShowOriginal")
+local chatDiag = note(cardTrad, "cadre de chat : pas encore scanne", THEME.sub)
 btn(cardTrad, { text = "Rescanner le chat du jeu", callback = function()
-    local n = Chat.rescan()
+    local n, where, exact = Chat.rescan()
+    chatDiag.Text = (exact and "cadre trouve : " or "detection par mot-cle : ")
+        .. tostring(where) .. "   -   " .. tostring(n) .. " element(s) de texte"
     setStatus(n > 0 and (n .. " element(s) de chat trouve(s), traduction relancee")
-        or "aucun chat trouve dans PlayerGui - ouvre le chat du jeu puis reclique",
+        or "aucun chat trouve - ouvre le Trade Chat dans le jeu puis reclique",
         n > 0 and THEME.good or THEME.warn)
 end })
-note(cardTrad, "Le hub lit le chat du jeu et le traduit sur place. Ce que tu tapes toi-meme apparait aussi ci-dessous des que tu valides. Si rien ne se traduit : ouvre le chat du jeu, puis clique sur Rescanner.", THEME.sub)
+note(cardTrad, "Le hub lit le Trade Chat du jeu et traduit chaque message sur place. Ce que tu tapes toi-meme apparait aussi ci-dessous des que tu valides. Si rien ne se traduit : ouvre le Trade Chat, puis clique sur Rescanner.", THEME.sub)
 
 local cardConv = card(pageChat, "Conversation",
     "le hub traduit et copie : c'est toi qui colles dans le chat du jeu")
@@ -1878,7 +1975,7 @@ end))
 local function init()
     log("demarrage lecture seule (executor : %s)", tostring(Env.isExecutor))
     Chat.getRemote()
-    Chat.hookIncoming()
+    local chatRemotes = #Chat.hookIncoming()
     if CONFIG.PatchChatGui then Chat.patchGui() end
 
     refreshPlayers()
@@ -1890,7 +1987,13 @@ local function init()
         "Touche du menu       : " .. tostring(CONFIG.Keybind.Name),
         "Mode                 : lecture seule (0 appel serveur, 0 deplacement)",
         "Executor detecte     : " .. (Env.isExecutor and "oui" or "non"),
-        "Chat ecoute          : " .. (Chat.remote and Chat.remote.Name or "aucun remote trouve"),
+        "Cadre de chat        : " .. (function()
+            local root, exact = Chat.root()
+            if not root then return "PlayerGui absent" end
+            return (exact and "" or "[mot-cle] ") .. root:GetFullName()
+        end)(),
+        "Remotes de chat      : " .. tostring(chatRemotes)
+            .. (chatRemotes > 0 and "  (abonne)" or "  (aucun)"),
         "Traduction en ligne  : " .. (httpOk and "operationnelle" or "indispo (phrases hors-ligne seulement)"),
         "Bases detectees      : " .. tostring(#Plots:All()),
         "API console          : getgenv().TradePlazaHub",
