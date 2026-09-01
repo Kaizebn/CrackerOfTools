@@ -59,8 +59,9 @@ local CONFIG = {
     TranslateTo       = "fr",
     SendAs            = "en",
     TranslateIncoming = true,
-    ShowOriginal      = true,
     PatchChatGui      = true,
+    TranslateButtons  = false,  -- les boutons du jeu (Deal?, Last Offer...) sont
+                                -- de l'interface, pas des messages : on les laisse
 
     -- Chemin exact du cadre de chat, relatif a PlayerGui. Renseigne pour
     -- Trade Live Trade : PlayerGui.TradeLiveTrade.TradeLiveTrade.Chat
@@ -104,6 +105,15 @@ local LANG_NAMES = {
 local function langName(code)
     code = tostring(code or "")
     return LANG_NAMES[code] or (code ~= "" and code or "auto-detect")
+end
+
+-- un fournisseur peut renvoyer autre chose qu'une langue ("?", un nom de
+-- service...) : on n'affiche que ce qui ressemble vraiment a un code langue
+local function isLangCode(code)
+    code = tostring(code or "")
+    if LANG_NAMES[code] then return true end
+    return string.match(code, "^%a%a$") ~= nil
+        or string.match(code, "^%a%a%-%a%a$") ~= nil
 end
 
 ----------------------------------------------------------------------------------
@@ -496,6 +506,16 @@ local RARITIES = {
     "common", "uncommon", "rare", "epic", "legendary", "mythic", "godly",
     "brainrot god", "secret", "limited", "exclusive", "og",
 }
+
+-- rang de rarete : plus le nombre est grand, plus c'est rare. Sert au tri
+-- (les plus rares en premier) et a la couleur du contour de la vignette.
+local RARITY_RANK = {}
+for i, r in ipairs(RARITIES) do RARITY_RANK[r] = i end
+
+local function rarityRank(name)
+    if not name then return 0 end
+    return RARITY_RANK[Util.lower(Util.trim(name))] or 0
+end
 local MUTATIONS = {
     "gold", "golden", "diamond", "rainbow", "lava", "bloodrot", "celestial",
     "candy", "galaxy", "nuclear", "radioactive", "ice", "fire", "crystal",
@@ -654,9 +674,12 @@ function Inspector.brainrots(plot)
         end
     end
 
+    -- les plus rares en tete, puis le meilleur revenu, puis la quantite
     table.sort(order, function(a, b)
-        if a.total == b.total then return a.count > b.count end
-        return a.total > b.total
+        local ra, rb = rarityRank(a.rarity), rarityRank(b.rarity)
+        if ra ~= rb then return ra > rb end
+        if a.total ~= b.total then return a.total > b.total end
+        return a.count > b.count
     end)
     return order, total, kept
 end
@@ -769,7 +792,9 @@ function Translator.providers(text, target, source)
                 if type(data) ~= "table" or type(data.responseData) ~= "table" then return nil end
                 local out = data.responseData.translatedText
                 if type(out) ~= "string" or out == "" then return nil end
-                return out, "mymemory"
+                -- ce fournisseur ne detecte pas la langue : "?" et pas son nom,
+                -- sinon l'indicateur affichait "mymemory" comme langue
+                return out, "?"
             end,
         },
     }
@@ -777,7 +802,10 @@ end
 
 function Translator.raw(text, target, source)
     local key = tostring(target) .. "|" .. text
-    if Translator.cache[key] then return Translator.cache[key], "cache" end
+    local hit = Translator.cache[key]
+    -- le cache garde aussi la langue detectee, sinon elle etait perdue des le
+    -- deuxieme passage sur le meme message
+    if hit then return hit.out, hit.src end
 
     -- si les trois fournisseurs viennent d'echouer, on ne relance pas trois
     -- requetes par message pendant 30 s : on passe direct au phrasebook
@@ -791,7 +819,7 @@ function Translator.raw(text, target, source)
         if body then
             local okParse, out, detected = pcall(provider.parse, body)
             if okParse and out and out ~= "" then
-                Translator.cache[key] = out
+                Translator.cache[key] = { out = out, src = detected or "?" }
                 return out, detected or "?"
             end
             lastErr = provider.name .. " : reponse illisible"
@@ -869,6 +897,14 @@ function Chat.inputBox()
         end
     end
     return fallback
+end
+
+-- Langue dans laquelle ta reponse est ecrite : celle detectee chez l'autre
+-- si on la connait, sinon celle choisie dans "Repli :".
+function Chat.replyLang()
+    local d = State.LastDetected
+    if d and d ~= "" and d ~= "?" then return d, true end
+    return CONFIG.SendAs, false
 end
 
 -- Traduit ton texte vers la langue choisie et l'ECRIT dans la zone de saisie
@@ -959,7 +995,20 @@ local UI_WORDS = {
     yes = true, no = true, ready = true, waiting = true, back = true,
     ["trade chat"] = true, ["type here..."] = true, ["type here"] = true,
     ["normal chat"] = true, ["restricted chat"] = true, ["live trade"] = true,
+    -- boutons de phrases toutes faites du jeu : ce sont des commandes, pas
+    -- des messages, et ils polluaient la conversation a chaque ouverture
+    ["deal?"] = true, ["deal ?"] = true, ["no thanks"] = true,
+    ["last offer"] = true, ["fair trade"] = true, ["add more"] = true,
+    ["ajouter plus"] = true, ["derniere offre"] = true, ["non merci"] = true,
+    ["first"] = true, ["you first"] = true, ["me first"] = true,
+    ["waiting..."] = true, ["not in a trade"] = true, clear = true,
 }
+
+-- "\u{1F4B0} Deal?" -> "deal?" : on enleve les emoji et symboles de tete
+-- avant de comparer, sinon aucun libelle du jeu ne correspondait
+local function coreText(t)
+    return Util.lower(Util.trim((string.gsub(tostring(t or ""), "^[^%w]+", ""))))
+end
 
 -- Cadre de chat cible. On resout CONFIG.ChatGuiPath sous PlayerGui : pour ce
 -- jeu c'est PlayerGui.TradeLiveTrade.TradeLiveTrade.Chat, qui contient
@@ -1018,6 +1067,7 @@ local function looksLikeMessage(text)
     if #t < 1 or #t > 240 then return false end
     if tonumber(t) then return false end
     if UI_WORDS[Util.lower(t)] then return false end
+    if UI_WORDS[coreText(t)] then return false end
     return true
 end
 
@@ -1050,9 +1100,10 @@ local function handleText(obj)
 
         if not out or out == original then return end
         if not obj.Parent then return end
-        local final = CONFIG.ShowOriginal and (original .. "  |  " .. out) or out
-        Chat.written[obj] = final
-        pcall(function() obj.Text = final end)
+        -- on remplace par la seule traduction : le "original | traduction"
+        -- doublait la longueur des lignes pour rien
+        Chat.written[obj] = out
+        pcall(function() obj.Text = out end)
     end)
 end
 
@@ -1079,12 +1130,17 @@ local function watchBox(box)
     end))
 end
 
+-- Les messages du chat sont des TextLabel. Les TextButton sont les phrases
+-- toutes faites du jeu (Deal?, Last Offer, Fair Trade...) : on ne les traduit
+-- pas, sinon elles remplissaient la conversation a chaque ouverture du chat.
 local function isTextDisplay(inst)
-    return inst:IsA("TextLabel") or inst:IsA("TextButton")
+    if inst:IsA("TextLabel") then return true end
+    return CONFIG.TranslateButtons and inst:IsA("TextButton") or false
 end
 
 local function handleAny(inst)
     if not onChatPath(inst) then return end
+    if inst:IsA("TextButton") and not CONFIG.TranslateButtons then return end
     if isTextDisplay(inst) then
         if Chat.seen[inst] == nil then
             Maid.conn(inst:GetPropertyChangedSignal("Text"):Connect(function()
@@ -1101,7 +1157,7 @@ local function handleAny(inst)
 end
 
 local function isTextThing(inst)
-    return isTextDisplay(inst) or inst:IsA("TextBox")
+    return inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")
 end
 
 function Chat.patchGui()
@@ -1747,6 +1803,27 @@ local function panel(parent, height)
     return scroll
 end
 
+-- meme chose, mais les elements se suivent HORIZONTALEMENT et le panneau
+-- defile de gauche a droite. Retourne le scroll et son cadre, pour pouvoir
+-- ajuster la hauteur selon la taille des vignettes.
+local function hpanel(parent, height)
+    local holder = corner(mk("Frame", {
+        Size = UDim2.new(1, 0, 0, height or 180), BackgroundColor3 = THEME.surface,
+        BorderSizePixel = 0, Parent = parent,
+    }), 8)
+    local scroll = mk("ScrollingFrame", {
+        Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+        ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(),
+        ScrollingDirection = Enum.ScrollingDirection.X, Parent = holder,
+    })
+    local layout = listLayout(scroll, 8, true)
+    Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroll.CanvasSize = UDim2.new(0, layout.AbsoluteContentSize.X + 10, 0, 0)
+    end))
+    return scroll, holder
+end
+
 local function textLine(scroll, text, color, font)
     return mk("TextLabel", {
         Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
@@ -1778,7 +1855,7 @@ local function tag(parent, text, color)
     return holder
 end
 
-local function cycleButton(parent, prefix, values, key, width, fmt)
+local function cycleButton(parent, prefix, values, key, width, fmt, onChange)
     fmt = fmt or tostring
     local index = 1
     for i, v in ipairs(values) do
@@ -1791,6 +1868,7 @@ local function cycleButton(parent, prefix, values, key, width, fmt)
             index = index % #values + 1
             CONFIG[key] = values[index]
             b.Text = prefix .. " " .. fmt(CONFIG[key])
+            if onChange then onChange(CONFIG[key]) end
         end,
     })
     return b
@@ -1822,7 +1900,7 @@ btn(rowBase, { text = "Copier la structure", width = 160, callback = function()
     if Util.copy(dump) then setStatus("structure copiee", THEME.good)
     else print(dump) setStatus("presse-papier indispo -> console F9", THEME.warn) end
 end })
-local brainrotPanel = panel(cardBase, 320)
+local brainrotPanel, brainrotHolder = hpanel(cardBase, 190)
 
 local function playerRow(scroll, plr)
     local row = corner(mk("Frame", {
@@ -1869,53 +1947,68 @@ refreshPlayers = function()
     end
 end
 
--- une ligne = une grande vignette 3D a gauche, les infos empilees a droite
-local function brainrotRow(scroll, entry)
-    local size    = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
-    local textX   = size + 18
-    local rowH    = math.max(size, 96) + 14
+-- couleur de contour par rarete : on repere la piece rare d'un coup d'oeil
+local RARITY_COLORS = {
+    common = Color3.fromRGB(150, 155, 170), uncommon = Color3.fromRGB(110, 205, 130),
+    rare = Color3.fromRGB(90, 160, 255), epic = Color3.fromRGB(180, 110, 255),
+    legendary = Color3.fromRGB(255, 190, 80), mythic = Color3.fromRGB(255, 110, 140),
+    godly = Color3.fromRGB(255, 90, 90), ["brainrot god"] = Color3.fromRGB(255, 60, 200),
+    secret = Color3.fromRGB(235, 235, 255), limited = Color3.fromRGB(0, 216, 190),
+    exclusive = Color3.fromRGB(255, 140, 0), og = Color3.fromRGB(255, 215, 0),
+}
 
-    local row = corner(mk("Frame", {
-        Size = UDim2.new(1, -6, 0, rowH), BackgroundColor3 = THEME.card,
-        BackgroundTransparency = 0.2, BorderSizePixel = 0, Parent = scroll,
-    }), 8)
-    stroke(row, THEME.line, 1, 0.65)
+local function rarityColor(name)
+    if not name then return THEME.line end
+    return RARITY_COLORS[Util.lower(Util.trim(name))] or THEME.line
+end
 
-    local icon = modelIcon(row, entry.model, size)
-    icon.Position = UDim2.new(0, 8, 0.5, -math.floor(size / 2))
+-- une vignette = le modele 3D en haut, le nom, la rarete et le revenu dessous.
+-- Elles se suivent horizontalement, la plus rare en premier.
+local function brainrotTile(scroll, entry)
+    local size = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
+    local col  = rarityColor(entry.rarity)
 
-    mk("TextLabel", {
-        Size = UDim2.new(1, -textX - 10, 0, 18), Position = UDim2.new(0, textX, 0, 12),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = entry.name,
-        TextSize = 14, TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
-    })
+    local tile = corner(mk("Frame", {
+        Size = UDim2.new(0, size + 16, 0, size + 64), BackgroundColor3 = THEME.card,
+        BackgroundTransparency = 0.15, BorderSizePixel = 0, Parent = scroll,
+    }), 10)
+    stroke(tile, col, 1.5, 0.3)
 
-    local tags = mk("Frame", {
-        Size = UDim2.new(1, -textX - 10, 0, 18), Position = UDim2.new(0, textX, 0, 36),
-        BackgroundTransparency = 1, Parent = row,
-    })
-    listLayout(tags, 5, true)
-    tag(tags, "x" .. entry.count, THEME.sub)
-    if entry.mutation then tag(tags, entry.mutation, THEME.warn) end
-    if entry.rarity then tag(tags, entry.rarity, THEME.accent) end
+    local icon = modelIcon(tile, entry.model, size)
+    icon.Position = UDim2.new(0, 8, 0, 8)
 
-    mk("TextLabel", {
-        Size = UDim2.new(1, -textX - 10, 0, 20), Position = UDim2.new(0, textX, 0, 62),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = entry.income > 0 and ("$" .. Util.short(entry.income) .. "/s") or "-",
-        TextSize = 16, TextColor3 = THEME.accent2,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
-    })
-    if entry.count > 1 and entry.total > 0 then
+    if entry.count > 1 then
+        local badge = corner(mk("Frame", {
+            Size = UDim2.new(0, 32, 0, 18), Position = UDim2.new(0, 12, 0, 12),
+            BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.12,
+            BorderSizePixel = 0, ZIndex = 5, Parent = tile,
+        }), 9)
         mk("TextLabel", {
-            Size = UDim2.new(1, -textX - 10, 0, 14), Position = UDim2.new(0, textX, 0, 84),
-            BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-            Text = "total $" .. Util.short(entry.total) .. "/s", TextSize = 11,
-            TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, ZIndex = 6,
+            Font = Enum.Font.GothamBold, Text = "x" .. entry.count, TextSize = 11,
+            TextColor3 = THEME.text, Parent = badge,
         })
     end
-    return row
+
+    mk("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 15), Position = UDim2.new(0, 6, 0, size + 12),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = entry.name,
+        TextSize = 12, TextColor3 = THEME.text,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
+    })
+    mk("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 13), Position = UDim2.new(0, 6, 0, size + 28),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+        Text = entry.mutation or entry.rarity or "-", TextSize = 10, TextColor3 = col,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
+    })
+    mk("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, size + 43),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = entry.total > 0 and ("$" .. Util.short(entry.total) .. "/s") or "-",
+        TextSize = 13, TextColor3 = THEME.accent2, Parent = tile,
+    })
+    return tile
 end
 
 scanBase = function(player, model, ownerName)
@@ -1929,6 +2022,8 @@ scanBase = function(player, model, ownerName)
     end
     State.Plot, State.PlotOwner = plot, ownerName
     clearChildren(brainrotPanel)
+    brainrotHolder.Size = UDim2.new(1, 0, 0,
+        math.floor(Util.clamp(CONFIG.ModelSize, 48, 260)) + 84)
 
     local list, total, count = Inspector.brainrots(plot)
     baseSummary.Text = string.format(
@@ -1942,7 +2037,7 @@ scanBase = function(player, model, ownerName)
     else
         for i, entry in ipairs(list) do
             if i > 60 then break end
-            brainrotRow(brainrotPanel, entry)
+            brainrotTile(brainrotPanel, entry)
         end
     end
     setStatus("base de " .. ownerName .. " : " .. count .. " brainrots", THEME.good)
@@ -1960,22 +2055,40 @@ local pageChat = addTab("Chat")
 
 local cardTrad = card(pageChat, "Traducteur",
     "la langue de l'autre est detectee toute seule")
+local refreshLangNote
+
 local rowLangs = rowOf(cardTrad)
 cycleButton(rowLangs, "Je lis :", LANGS, "TranslateTo", 168, langName)
-cycleButton(rowLangs, "J'ecris :", LANGS, "SendAs", 168, langName)
+cycleButton(rowLangs, "Repli :", LANGS, "SendAs", 168, langName, function()
+    refreshLangNote()
+end)
 
-local detectNote = note(cardTrad, "langue detectee : auto-detect", THEME.accent2)
+local detectNote = note(cardTrad, "langue detectee : en attente d'un message", THEME.accent2)
+
+refreshLangNote = function()
+    local lang, fromDetection = Chat.replyLang()
+    detectNote.Text = "langue detectee : "
+        .. (State.LastDetected and langName(State.LastDetected) or "en attente")
+        .. "     ->     ta reponse partira en " .. langName(lang)
+        .. (fromDetection and " (detecte)" or " (repli)")
+end
 
 -- appele par le traducteur des qu'un fournisseur nous rend la langue source
 function UI.setDetected(code)
     local c = Util.trim(tostring(code or ""))
     if c == "" or c == "?" or c == "cache" or c == "hors-ligne" then return end
+    if not isLangCode(c) then return end
+    -- tes propres messages passent aussi dans le chat : si la langue detectee
+    -- est celle que tu lis, c'est probablement toi, pas ton interlocuteur.
+    -- On ne s'en sert pas comme langue de reponse.
+    if c == CONFIG.TranslateTo then return end
     State.LastDetected = c
-    detectNote.Text = "langue detectee : " .. langName(c) .. "   (" .. c .. ")"
+    refreshLangNote()
 end
 
+refreshLangNote()
+
 switch(cardTrad, "Traduire les messages recus", "TranslateIncoming")
-switch(cardTrad, "Garder le texte original a cote", "ShowOriginal")
 
 local chatDiag = note(cardTrad, "cadre de chat : pas encore scanne", THEME.sub)
 btn(cardTrad, { text = "Rescanner le chat du jeu", callback = function()
@@ -1990,34 +2103,44 @@ end })
 local cardConv = card(pageChat, "Conversation",
     "tape dans ta langue : le hub traduit et ecrit dans le chat du jeu")
 local chatPanel = panel(cardConv, 150)
-local chatField = field(cardConv, "type in your language...")
+
+local sendReply
+local chatField = field(cardConv, "type in your language...   (Entree pour envoyer)",
+    function(text) if sendReply then sendReply(text) end end)
 local rowSend = rowOf(cardConv, 36)
 
+-- traduit vers la langue detectee chez l'autre (repli sur "Repli :") puis
+-- ecrit dans la zone de saisie du chat du jeu
+sendReply = function(text)
+    local lang, fromDetection = Chat.replyLang()
+    local ok, msg, written, copied = Chat.compose(text, lang)
+    if not ok then setStatus(tostring(msg), THEME.bad) return end
+    chatField.Text = ""
+    local how = " [" .. langName(lang) .. (fromDetection and " detecte]" or " repli]")
+    if written then
+        setStatus("ecrit dans le chat" .. how .. " : " .. tostring(msg), THEME.good)
+    elseif copied then
+        setStatus("zone de saisie introuvable, copie" .. how .. " : " .. tostring(msg), THEME.warn)
+    else
+        setStatus("traduit" .. how .. " : " .. tostring(msg), THEME.warn)
+    end
+end
+
 btn(rowSend, { text = "ECRIRE DANS LE CHAT", width = 214, height = 36, style = "primary",
-    callback = function()
-        local ok, msg, written, copied = Chat.compose(chatField.Text, CONFIG.SendAs)
-        if not ok then setStatus(tostring(msg), THEME.bad) return end
-        chatField.Text = ""
-        if written then
-            setStatus("ecrit dans le chat, appuie sur Entree : " .. tostring(msg), THEME.good)
-        elseif copied then
-            setStatus("zone de saisie introuvable - copie : " .. tostring(msg), THEME.warn)
-        else
-            setStatus("traduit : " .. tostring(msg), THEME.warn)
-        end
-    end })
+    callback = function() sendReply(chatField.Text) end })
 btn(rowSend, { text = "Effacer", width = 104, height = 36, callback = function()
     chatField.Text = ""
     clearChildren(chatPanel)
     setStatus("conversation effacee", THEME.sub)
 end })
 
+-- une seule ligne par message, celle qui compte : la traduction. Le doublon
+-- en gris avec le texte d'origine rendait la conversation illisible.
 function UI.pushChat(entry)
-    textLine(chatPanel, string.format("[%s] %s : %s", entry.at, entry.who, entry.original),
-        THEME.sub, Enum.Font.Gotham)
-    if entry.translated and entry.translated ~= entry.original then
-        textLine(chatPanel, "      -> " .. entry.translated, THEME.accent2, Enum.Font.GothamMedium)
-    end
+    local shown = entry.translated or entry.original
+    if not shown or shown == "" then return end
+    textLine(chatPanel, string.format("[%s]  %s", entry.at, shown),
+        THEME.accent2, Enum.Font.GothamMedium)
     local children = chatPanel:GetChildren()
     if #children > 120 then
         for i = 1, 20 do
