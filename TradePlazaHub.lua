@@ -1634,7 +1634,7 @@ local scanBase, refreshPlayers
 local pagePlayers = addTab("Joueurs")
 
 local cardList = card(pagePlayers, "Joueurs du serveur",
-    "clique sur un joueur pour voir sa base")
+    "qui est la, avec sa tete et son UserId")
 local playersPanel = panel(cardList, 300)
 btn(cardList, { text = "Rafraichir", callback = function()
     refreshPlayers()
@@ -1652,27 +1652,20 @@ local function playerRow(scroll, plr)
     head.Position = UDim2.new(0, 8, 0.5, -17)
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -146, 0, 15), Position = UDim2.new(0, 50, 0, 8),
+        Size = UDim2.new(1, -60, 0, 15), Position = UDim2.new(0, 50, 0, 8),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = plr.DisplayName ~= "" and plr.DisplayName or plr.Name, TextSize = 12,
         TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, -146, 0, 13), Position = UDim2.new(0, 50, 0, 25),
+        Size = UDim2.new(1, -60, 0, 13), Position = UDim2.new(0, 50, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
         Text = "@" .. plr.Name .. "   -   " .. plr.UserId, TextSize = 10,
         TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local actions = mk("Frame", {
-        Size = UDim2.new(0, 126, 0, 30), Position = UDim2.new(1, -134, 0.5, -15),
-        BackgroundTransparency = 1, Parent = row,
-    })
-    listLayout(actions, 5, true)
-    btn(actions, { text = "VOIR LA BASE", width = 126, height = 30, style = "primary",
-        callback = function() scanBase(plr) end })
     return row
 end
 
@@ -1696,7 +1689,7 @@ end
 local pageBase = addTab("Base")
 
 local cardScan = card(pageBase, "Base affichee",
-    "passe par l'onglet Joueurs pour choisir une base")
+    "scanne ta propre base et lis ce qu'elle contient")
 local rowScan = rowOf(cardScan)
 btn(rowScan, { text = "Ma base", width = 110, style = "primary",
     callback = function() scanBase(LocalPlayer) end })
