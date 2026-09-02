@@ -4802,7 +4802,15 @@ Maid.conn(Players.PlayerRemoving:Connect(function()
     spawnTask(function() waitFor(0.2) pcall(refreshPlayers) end)
 end))
 local function init()
-    log("demarrage lecture seule (executor : %s)", tostring(Env.isExecutor))
+    log("demarrage (executor : %s)", tostring(Env.isExecutor))
+
+    -- On annonce le remote d'invitation retenu : c'est la premiere chose a
+    -- verifier quand le bouton TRADE ne fait rien.
+    local tradeRemote = Trade.remote()
+    log("remote d'invitation : %s", tradeRemote
+        and (tradeRemote:GetFullName() .. "  (" .. tradeRemote.ClassName .. ")")
+        or "AUCUN TROUVE")
+
     Chat.getRemote()
     local chatRemotes = #Chat.hookIncoming()
     if CONFIG.PatchChatGui then Chat.patchGui() end
