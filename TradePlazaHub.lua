@@ -1957,6 +1957,15 @@ local function card(page, title, subtitle)
     }), 12)
     stroke(holder, THEME.line, 1, 0.35)
     depth3D(holder, THEME.line, THEME.accent2)
+
+    if title then
+        local accentLine = mk("Frame", {
+            Size = UDim2.new(0, 2, 0, 8), Position = UDim2.new(0, 0, 0, 12),
+            BackgroundColor3 = THEME.accent2, BorderSizePixel = 0, Parent = holder,
+        })
+        corner(accentLine, 1)
+    end
+
     pad(holder, 14)
     listLayout(holder, 8)
 
@@ -2034,10 +2043,11 @@ local function btn(parent, opts)
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = b,
     })
     if style == "ghost" then stroke(b, THEME.line, 1, 0.4) end
+    depth3D(b, THEME.line, THEME.accent2)
 
     Maid.conn(b.MouseEnter:Connect(function()
         tween(b, { BackgroundColor3 = hover }, 0.14)
-        tween(halo, { Transparency = 0.15, Thickness = 2 }, 0.16)
+        tween(halo, { Transparency = 0.08, Thickness = 2.2 }, 0.16)
         tween(sheen, { BackgroundTransparency = 0.6 }, 0.16)
     end))
     Maid.conn(b.MouseLeave:Connect(function()
@@ -2450,6 +2460,7 @@ local function brainrotTile(scroll, entry, index)
         BackgroundTransparency = 1, BorderSizePixel = 0, Parent = scroll,
     }), 10)
     local tileStroke = stroke(tile, col, 1.5, 1)
+    depth3D(tile, col, THEME.accent2)
 
     local icon = modelIcon(tile, entry.model, size)
     icon.Position = UDim2.new(0, 8 + size / 2, 0, 8 + size / 2)
