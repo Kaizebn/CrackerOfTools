@@ -121,11 +121,16 @@ local CONFIG = {
     AllowTrade  = true,
     -- Chemin d'un remote d'invitation impose, si la detection se trompe.
     -- Exemple : "ReplicatedStorage.Packages.Net.RF/TradeService/Invite"
-    TradeRemote = "",
+    -- Chemin du remote d'invitation, capture en observant le jeu envoyer sa
+    -- propre demande de trade. Son nom est HACHE, donc introuvable par mot-
+    -- cle : il faut le designer. ATTENTION, ce hachage change a chaque mise
+    -- a jour du jeu -- si le trade cesse de marcher, recapture-le.
+    TradeRemote = "ReplicatedStorage.Packages.Net."
+        .. "RF/bfc9b78bc7ac12dc1fa4cdab68df020234c6ed9df668ffd8d25f8a29b5b3bb68",
     -- Ce qu'on passe au remote d'invitation. Impossible a deviner sans
     -- essayer : le service attend soit le Player, soit son UserId, soit son
     -- pseudo. Change-le dans Reglages si l'invitation ne part pas.
-    TradeArgument = "joueur",   -- "joueur" | "userid" | "pseudo"
+    TradeArgument = "guid+userid",
 
     -- Deplacement vers une base. Le plus risque du script : lis le pave au
     -- dessus du module Movement avant de toucher a ces valeurs.
@@ -278,17 +283,26 @@ function Util.clamp(v, a, b)
     return v
 end
 
+-- Suffixes du jeu. S'arreter a T ne suffit pas : les compteurs montent
+-- jusqu'a "$6.2Qa", et une base riche etait lue comme si elle valait
+-- quelques milliers. Les deux lettres se testent AVANT une seule, sinon
+-- "Qa" se lirait comme un "Q" suivi d'un "a" perdu.
+Util.suffixes = {
+    k = 1e3, m = 1e6, b = 1e9, t = 1e12,
+    qa = 1e15, q = 1e15, qi = 1e18, sx = 1e21, sp = 1e24,
+    oc = 1e27, no = 1e30, dc = 1e33,
+}
+
 function Util.parseNumber(txt)
     if not txt then return nil end
     local clean = string.gsub(tostring(txt), "[%s,]", "")
-    local num, suffix = string.match(clean, "([%d%.]+)%s*([KkMmBbTt]?)")
+    local num, suffix = string.match(clean, "([%d%.]+)(%a?%a?)")
     local value = tonumber(num)
     if not value then return nil end
+
     suffix = string.lower(suffix or "")
-    if suffix == "k" then value = value * 1e3
-    elseif suffix == "m" then value = value * 1e6
-    elseif suffix == "b" then value = value * 1e9
-    elseif suffix == "t" then value = value * 1e12 end
+    local mult = Util.suffixes[suffix] or Util.suffixes[string.sub(suffix, 1, 1)]
+    if mult then value = value * mult end
     return value
 end
 
@@ -518,11 +532,11 @@ end
 ----------------------------------------------------------------------------------
 local Plots = {}
 
-local OWNER_KEYS = {
+Plots.ownerKeys = {
     "Owner", "OwnerId", "OwnerID", "OwnerUserId", "UserId", "UserID",
     "Player", "PlayerId", "PlayerName", "OwnerName", "Occupant",
 }
-local CONTAINER_NAMES = {
+Plots.containerNames = {
     "plots", "plot", "bases", "base", "playerplots", "playerbases", "islands", "tycoons",
 }
 
@@ -530,7 +544,7 @@ function Plots:Containers()
     local out = {}
     for _, child in ipairs(workspace:GetChildren()) do
         local n = Util.lower(child.Name)
-        for _, want in ipairs(CONTAINER_NAMES) do
+        for _, want in ipairs(Plots.containerNames) do
             if n == want then table.insert(out, child) break end
         end
     end
@@ -539,7 +553,7 @@ function Plots:Containers()
             if child:IsA("Folder") or child:IsA("Model") then
                 for _, sub in ipairs(child:GetChildren()) do
                     local n = Util.lower(sub.Name)
-                    for _, want in ipairs(CONTAINER_NAMES) do
+                    for _, want in ipairs(Plots.containerNames) do
                         if n == want then table.insert(out, sub) break end
                     end
                 end
@@ -549,8 +563,44 @@ function Plots:Containers()
     return out
 end
 
+-- Le panneau planté devant chaque base porte "Pseudo's Base". C'est la
+-- source la plus fiable du proprietaire, et de loin : les attributs varient
+-- d'un jeu a l'autre, ce panneau non. Le lire en premier est ce qui empeche
+-- de confondre deux bases voisines.
+function Plots:SignOwner(plot)
+    local sign = plot:FindFirstChild("PlotSign")
+    if not sign then return nil end
+
+    local gui = sign:FindFirstChildWhichIsA("SurfaceGui", true)
+    local label = gui and gui:FindFirstChildWhichIsA("TextLabel", true)
+    local text = label and Util.trim(tostring(label.Text or "")) or ""
+    if text == "" then return nil end
+
+    local low = Util.lower(text)
+    -- une base libre, ou la tienne vue de ton propre client
+    if string.find(low, "empty", 1, true)
+    or string.find(low, "your base", 1, true) then return nil end
+
+    local name = string.match(text, "^(.+)'s Base$") or text
+    name = Util.trim(name)
+    if name == "" then return nil end
+
+    -- on rend le vrai joueur quand il est encore la, le nom sinon
+    local plr = Players:FindFirstChild(name)
+    if not plr then
+        for _, q in ipairs(Players:GetPlayers()) do
+            if q.DisplayName == name then plr = q break end
+        end
+    end
+    return plr, name
+end
+
 function Plots:OwnerOf(model)
-    for _, key in ipairs(OWNER_KEYS) do
+    -- panneau d'abord
+    local signed = self:SignOwner(model)
+    if signed then return signed end
+
+    for _, key in ipairs(Plots.ownerKeys) do
         local ok, val = pcall(function() return model:GetAttribute(key) end)
         if ok and val ~= nil then
             if type(val) == "number" then
@@ -564,7 +614,7 @@ function Plots:OwnerOf(model)
         end
     end
     for _, d in ipairs(model:GetChildren()) do
-        for _, key in ipairs(OWNER_KEYS) do
+        for _, key in ipairs(Plots.ownerKeys) do
             if d.Name == key then
                 if d:IsA("ObjectValue") and d.Value and d.Value:IsA("Player") then
                     return d.Value
@@ -852,6 +902,60 @@ do
     end
 end
 
+-- Le jeu embarque sa propre liste dans ReplicatedStorage.Datas.Animals.
+-- La lire vaut mieux que se fier a une liste figee : elle contient les
+-- brainrots sortis apres l'ecriture de ce script, avec leur rarete.
+--
+-- Le module est protege, d'ou setthreadidentity(8) avant le require ; et il
+-- n'est pas forcement replique au lancement, d'ou les tentatives repetees.
+local Cat = {}
+function Cat.harvest()
+    local datas = ReplicatedStorage:FindFirstChild("Datas")
+    local mod = datas and datas:FindFirstChild("Animals")
+    if not mod then mod = ReplicatedStorage:FindFirstChild("Animals", true) end
+    if not mod or not mod:IsA("ModuleScript") then return 0 end
+
+    if setthreadidentity then pcall(setthreadidentity, 8) end
+    local ok, data = pcall(require, mod)
+    if not ok or type(data) ~= "table" then return 0 end
+
+    local added = 0
+    for index, info in pairs(data) do
+        local name, rarity
+        if type(info) == "table" then
+            -- oeufs et lucky blocks ne sont pas des pieces
+            if info.Egg ~= true and info.LuckyBlock ~= true then
+                name = (type(info.DisplayName) == "string" and info.DisplayName ~= "")
+                    and info.DisplayName
+                    or (type(index) == "string" and index or nil)
+                rarity = type(info.Rarity) == "string" and info.Rarity or nil
+            end
+        elseif type(index) == "string" then
+            name = index
+        end
+
+        if name then
+            local key = normalizeName(name)
+            -- on ne remplace pas une entree de la liste ecrite a la main :
+            -- elle porte le rang exact au sein de son palier
+            if key ~= "" and not CATALOG[key] then
+                local tier = rarity and Util.lower(Util.trim(rarity)) or nil
+                local tierIndex = 0
+                for i, entry in ipairs(BRAINROT_TIERS) do
+                    if entry.tier == tier then tierIndex = i break end
+                end
+                CATALOG[key] = {
+                    tier = tier,
+                    -- sans palier connu on le laisse au niveau du revenu
+                    rank = tierIndex > 0 and (tierIndex * 1000) or 0,
+                }
+                added = added + 1
+            end
+        end
+    end
+    return added
+end
+
 local function catalogOf(name)
     if not name then return nil end
     return CATALOG[normalizeName(name)]
@@ -1026,7 +1130,12 @@ end
 -- dans la base des joueurs.
 local looksLikeDecor
 do
+    -- Les noms exacts du jeu viennent du scanner de Player Finder, qui
+    -- lit la meme carte : ce sont les enfants d'un plot qui ne sont pas
+    -- des brainrots.
     local NOT_BRAINROT = {
+        "plotsign", "animalpodiums", "conveyor", "decorations", "purchases",
+        "friendpanel", "unlock", "laser", "walls", "floor", "skin", "cash",
         "shop", "boutique", "display", "presentoir", "preview", "apercu",
         "index", "catalog", "catalogue", "showcase", "vitrine", "npc", "vendor",
         "seller", "merchant", "marchand", "leaderboard", "classement", "spawn",
@@ -1161,15 +1270,32 @@ function Inspector.group(chosen)
     return order, total, kept
 end
 
+-- Le jeu range les brainrots poses dans plot.AnimalPodiums.<slot>. Viser ce
+-- dossier plutot que de ratisser toute la base evite de ramasser le decor,
+-- les PNJ et les modeles d'interface qui trainent dedans.
 function Inspector.brainrots(plot)
     if not plot then return {}, 0, 0 end
-    local ok, list = pcall(function() return plot:GetDescendants() end)
-    if not ok then return {}, 0, 0 end
 
     local candidates = {}
-    for _, d in ipairs(list) do
-        if d:IsA("Model") and isEntityModel(d) then candidates[d] = true end
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if podiums then
+        for _, podium in ipairs(podiums:GetDescendants()) do
+            if podium:IsA("Model") and isEntityModel(podium) then
+                candidates[podium] = true
+            end
+        end
     end
+
+    -- Repli : certaines bases posent les pieces directement sous le plot,
+    -- ou le dossier porte un autre nom.
+    if not next(candidates) then
+        local ok, list = pcall(function() return plot:GetDescendants() end)
+        if not ok then return {}, 0, 0 end
+        for _, d in ipairs(list) do
+            if d:IsA("Model") and isEntityModel(d) then candidates[d] = true end
+        end
+    end
+
     return Inspector.group(outermost(candidates, plot))
 end
 
@@ -1509,7 +1635,27 @@ end
 -- CONFIG.AllowTrade = false coupe tout et rend le script strictement lecture
 -- seule, comme avant l'ajout de ce bouton.
 ----------------------------------------------------------------------------------
-local Trade = { args = { "joueur", "userid", "pseudo" } }
+local Trade = { args = { "guid+userid", "guid+joueur", "joueur", "userid", "pseudo" } }
+
+-- Ce que le jeu envoie vraiment, capture en cliquant sur son propre bouton :
+--   Event:InvokeServer("8fbe1594-7cef-4c29-94d1-a0e93adfa5a4", 9963256691)
+-- Deux arguments : un identifiant de requete au format GUID, puis l'UserId
+-- de la cible. Le GUID a la forme exacte de HttpService:GenerateGUID(false)
+-- (8-4-4-4-12, sans accolades), et il sert au serveur a rattacher sa reponse
+-- InviteResult a la demande : on en fabrique donc un neuf a chaque envoi.
+function Trade.buildArgs(player)
+    local mode = CONFIG.TradeArgument or "guid+userid"
+    if mode == "guid+userid" then
+        return HttpService:GenerateGUID(false), player.UserId
+    elseif mode == "guid+joueur" then
+        return HttpService:GenerateGUID(false), player
+    elseif mode == "userid" then
+        return player.UserId
+    elseif mode == "pseudo" then
+        return player.Name
+    end
+    return player
+end
 
 function Trade.findButton(player)
     local gui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -1568,7 +1714,7 @@ end
 -- Un remote d'invitation de trade porte "invite", mais tout ce qui porte
 -- "invite" n'invite pas : AcceptInvite, DeclineInvite et InviteResult sont
 -- les reponses, et DuelsMachineService invite en duel, pas en trade.
-local TRADE_REJECT = { "accept", "decline", "result", "cancel", "duel" }
+Trade.reject = { "accept", "decline", "result", "cancel", "duel" }
 
 -- Tous les remotes qui pourraient lancer une invitation, du plus probable
 -- au moins probable. On les liste au lieu d'en elire un d'office : lequel
@@ -1579,7 +1725,7 @@ function Trade.candidates()
         local full = Util.lower(d:GetFullName())
         if string.find(full, "invite", 1, true) then
             local rejected = false
-            for _, bad in ipairs(TRADE_REJECT) do
+            for _, bad in ipairs(Trade.reject) do
                 if string.find(full, bad, 1, true) then rejected = true break end
             end
             -- CreateInvite porte "create" et non "accept" : il reste candidat
@@ -1603,20 +1749,27 @@ end
 function Trade.remote()
     if Trade.cached and Trade.cached.Parent then return Trade.cached end
 
-    local list = Trade.candidates()
     local forced = CONFIG.TradeRemote
-
-    -- Comparaison sur le nom complet plutot que par chemin pointe : ces
-    -- remotes s'appellent "RF/TradeService/Invite", slashs compris, ce qu'un
-    -- decoupage sur les points ne sait pas retrouver.
     if forced and forced ~= "" then
-        for _, d in ipairs(list) do
+        -- Chemin direct d'abord. Le vrai remote d'invitation porte un nom
+        -- HACHE ("RF/bfc9b78b...") qui ne contient pas "invite" : aucune
+        -- recherche par mot-cle ne peut le trouver, il faut le designer.
+        local node = Util.dottedPath(forced)
+        if node and isRemote(node) then
+            Trade.cached = node
+            log("remote de trade (chemin) -> %s", node:GetFullName())
+            return node
+        end
+        for _, d in ipairs(allRemotes()) do
             if d:GetFullName() == forced or d.Name == forced then
                 Trade.cached = d
                 return d
             end
         end
+        log("remote de trade introuvable au chemin : %s", tostring(forced))
     end
+
+    local list = Trade.candidates()
 
     local best = list[1]
     if best then
@@ -1639,12 +1792,10 @@ function Trade.viaRemote(player)
 
     -- RF/TradeService/Invite est une RemoteFunction : il faut InvokeServer,
     -- pas FireServer. C'est ce qui faisait echouer l'envoi silencieusement.
-    local arg = player
-    if CONFIG.TradeArgument == "userid" then arg = player.UserId
-    elseif CONFIG.TradeArgument == "pseudo" then arg = player.Name end
-
     if remote:IsA("RemoteFunction") then
-        local ok, res = pcall(function() return remote:InvokeServer(arg) end)
+        local ok, res = pcall(function()
+            return remote:InvokeServer(Trade.buildArgs(player))
+        end)
         if not ok then
             -- l'erreur du serveur dit souvent exactement ce qui manque
             log("trade REJETE par %s : %s", remote:GetFullName(), tostring(res))
@@ -1669,7 +1820,7 @@ function Trade.viaRemote(player)
         return true, "invitation envoyee"
     end
 
-    if not pcall(function() remote:FireServer(arg) end) then
+    if not pcall(function() remote:FireServer(Trade.buildArgs(player)) end) then
         return false, "le remote a refuse l'appel"
     end
     log("trade via %s", remote:GetFullName())
@@ -1715,7 +1866,7 @@ end
 ----------------------------------------------------------------------------------
 local Movement = { token = 0 }
 
-local CARPET_WORDS = { "carpet", "tapis", "rug", "magiccarpet", "flyingcarpet" }
+Movement.carpetWords = { "carpet", "tapis", "rug", "magiccarpet", "flyingcarpet" }
 
 function Movement.findCarpet()
     local function scan(container)
@@ -1723,7 +1874,7 @@ function Movement.findCarpet()
         for _, tool in ipairs(container:GetChildren()) do
             if tool:IsA("Tool") then
                 local n = Util.lower(tool.Name)
-                for _, word in ipairs(CARPET_WORDS) do
+                for _, word in ipairs(Movement.carpetWords) do
                     if string.find(n, word, 1, true) then return tool end
                 end
             end
@@ -4059,7 +4210,7 @@ refreshPlayers = function()
 end
 
 -- couleur de contour par rarete : on repere la piece rare d'un coup d'oeil
-local RARITY_COLORS = {
+UI.rarityColors = {
     common = Color3.fromRGB(150, 155, 170), uncommon = Color3.fromRGB(110, 205, 130),
     rare = Color3.fromRGB(90, 160, 255), epic = Color3.fromRGB(180, 110, 255),
     legendary = Color3.fromRGB(255, 190, 80), mythic = Color3.fromRGB(255, 110, 140),
@@ -4094,7 +4245,7 @@ end
 
 local function rarityColor(name)
     if not name then return THEME.line end
-    return RARITY_COLORS[Util.lower(Util.trim(name))] or THEME.line
+    return UI.rarityColors[Util.lower(Util.trim(name))] or THEME.line
 end
 
 -- une vignette = le modele 3D en haut, le nom, la rarete et le revenu dessous.
@@ -4891,6 +5042,23 @@ Maid.conn(Players.PlayerRemoving:Connect(function()
 end))
 local function init()
     log("demarrage (executor : %s)", tostring(Env.isExecutor))
+
+    -- Le catalogue du jeu n'est pas forcement replique au lancement : on
+    -- reessaie un moment avant d'abandonner, sinon la liste ecrite a la
+    -- main reste seule et les brainrots recents sont inconnus.
+    spawnTask(function()
+        for _ = 1, 20 do
+            if State.Unloaded then return end
+            local added = 0
+            pcall(function() added = Cat.harvest() end)
+            if added > 0 then
+                log("catalogue du jeu : %d noms ajoutes", added)
+                return
+            end
+            waitFor(0.5)
+        end
+        log("catalogue du jeu introuvable, liste interne seule")
+    end)
 
     -- On annonce le remote d'invitation retenu : c'est la premiere chose a
     -- verifier quand le bouton TRADE ne fait rien.
