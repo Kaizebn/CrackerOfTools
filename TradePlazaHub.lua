@@ -122,6 +122,10 @@ local CONFIG = {
     -- Chemin d'un remote d'invitation impose, si la detection se trompe.
     -- Exemple : "ReplicatedStorage.Packages.Net.RF/TradeService/Invite"
     TradeRemote = "",
+    -- Ce qu'on passe au remote d'invitation. Impossible a deviner sans
+    -- essayer : le service attend soit le Player, soit son UserId, soit son
+    -- pseudo. Change-le dans Reglages si l'invitation ne part pas.
+    TradeArgument = "joueur",   -- "joueur" | "userid" | "pseudo"
 
     -- Deplacement vers une base. Le plus risque du script : lis le pave au
     -- dessus du module Movement avant de toucher a ces valeurs.
@@ -142,6 +146,11 @@ local CONFIG = {
     ShowSecret    = true,
     ShowOG        = true,
     ShowUnknown   = true,   -- pieces dont on n'a pas pu lire la rarete
+
+    -- Une piece sans revenu affiche et inconnue du catalogue est ecartee :
+    -- c'est ce qui tient les abeilles et les PNJ hors de la base. Mets
+    -- false si des brainrots legitimes manquent a l'appel.
+    RequireIncome = true,
 
     -- Rayon de lecture au Trade Plaza (en studs). Cette carte n'a pas de
     -- conteneur "Plots" : les brainrots sont poses autour du joueur, donc on
@@ -942,7 +951,18 @@ local function readEntity(model)
         end
     end
 
-    for _, t in ipairs(guiTexts(model)) do
+    -- On ne lit QUE les pancartes posees sur la piece elle-meme, pas tous
+    -- les textes qui trainent dans ses descendants. Un stand entier
+    -- contient l'interface du jeu, et le nom d'un brainrot du catalogue
+    -- affiche ailleurs finissait recopie sur la piece scannee.
+    local plates = {}
+    for _, d in ipairs(model:GetChildren()) do
+        if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+            for _, t in ipairs(guiTexts(d)) do plates[#plates + 1] = t end
+        end
+    end
+
+    for _, t in ipairs(plates) do
         local lt = Util.lower(t)
         if string.find(lt, "/s", 1, true) or string.find(t, "%$") then
             local n = Util.parseNumber(t)
@@ -984,15 +1004,36 @@ local function readEntity(model)
     return info
 end
 
+-- Decor et PNJ a ne jamais compter : une abeille du jeu, un vendeur ou un
+-- presentoir de boutique portent eux aussi un Humanoid, et se retrouvaient
+-- dans la base des joueurs.
+local looksLikeDecor
+do
+    local NOT_BRAINROT = {
+        "shop", "boutique", "display", "presentoir", "preview", "apercu",
+        "index", "catalog", "catalogue", "showcase", "vitrine", "npc", "vendor",
+        "seller", "merchant", "marchand", "leaderboard", "classement", "spawn",
+        "bee", "abeille", "bird", "oiseau", "butterfly", "papillon",
+    }
+    looksLikeDecor = function(model)
+        local node, depth = model, 0
+        while node and node ~= workspace and depth < 5 do
+            local n = Util.lower(node.Name)
+            for _, bad in ipairs(NOT_BRAINROT) do
+                if string.find(n, bad, 1, true) then return true end
+            end
+            node, depth = node.Parent, depth + 1
+        end
+        return false
+    end
+end
+
 local function isEntityModel(model)
     if not model:IsA("Model") then return false end
-    if model:FindFirstChildWhichIsA("Humanoid") then return true end
-    if model:FindFirstChildWhichIsA("AnimationController") then return true end
+    if looksLikeDecor(model) then return false end
 
-    local parentName = Util.lower(model.Parent and model.Parent.Name or "")
-    if parentName == "purchases" or parentName == "animals" or parentName == "pets"
-    or parentName == "brainrots" or parentName == "items" then return true end
-
+    -- Le signal fort : une pancarte qui annonce un revenu. Dans ce jeu,
+    -- tout brainrot pose affiche son $/s ; une abeille ou un vendeur non.
     for _, d in ipairs(model:GetChildren()) do
         if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
             for _, t in ipairs(guiTexts(d)) do
@@ -1002,6 +1043,14 @@ local function isEntityModel(model)
             end
         end
     end
+
+    -- Sinon, il faut etre range dans un conteneur qui dit ce qu'on est.
+    -- Un Humanoid seul ne suffit plus : c'est ce qui laissait passer les
+    -- abeilles et les PNJ.
+    local parentName = Util.lower(model.Parent and model.Parent.Name or "")
+    if parentName == "purchases" or parentName == "animals" or parentName == "pets"
+    or parentName == "brainrots" or parentName == "items" then return true end
+
     return false
 end
 
@@ -1041,7 +1090,15 @@ function Inspector.group(chosen)
     local buckets, order, total, kept = {}, {}, 0, 0
     for _, model in ipairs(chosen) do
         local info = readEntity(model)
-        if not Inspector.isIgnored(info.name) then
+
+        -- Derniere barriere : une piece qui n'affiche aucun revenu ET que le
+        -- catalogue ne connait pas n'est pas un brainrot. C'est ce qui
+        -- laissait passer les abeilles du jeu et les PNJ, affiches avec un
+        -- revenu et une rarete a "-".
+        local known = catalogOf(info.name) ~= nil
+        local real = known or info.income > 0 or CONFIG.RequireIncome == false
+
+        if real and not Inspector.isIgnored(info.name) then
             kept = kept + 1
             local key = Util.lower((info.name or "?") .. "|" .. (info.mutation or ""))
             local b = buckets[key]
@@ -1435,7 +1492,7 @@ end
 -- CONFIG.AllowTrade = false coupe tout et rend le script strictement lecture
 -- seule, comme avant l'ajout de ce bouton.
 ----------------------------------------------------------------------------------
-local Trade = {}
+local Trade = { args = { "joueur", "userid", "pseudo" } }
 
 function Trade.findButton(player)
     local gui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -1542,17 +1599,37 @@ function Trade.viaRemote(player)
 
     -- RF/TradeService/Invite est une RemoteFunction : il faut InvokeServer,
     -- pas FireServer. C'est ce qui faisait echouer l'envoi silencieusement.
+    local arg = player
+    if CONFIG.TradeArgument == "userid" then arg = player.UserId
+    elseif CONFIG.TradeArgument == "pseudo" then arg = player.Name end
+
     if remote:IsA("RemoteFunction") then
-        local ok, res = pcall(function() return remote:InvokeServer(player) end)
-        if not ok then return false, "le serveur a rejete l'appel" end
-        log("trade via %s -> %s", remote:GetFullName(), tostring(res))
-        -- beaucoup de services renvoient false quand l'invitation n'a pas pu
-        -- partir (deja en trade, invitations coupees, joueur trop loin)
+        local ok, res = pcall(function() return remote:InvokeServer(arg) end)
+        if not ok then
+            -- l'erreur du serveur dit souvent exactement ce qui manque
+            log("trade REJETE par %s : %s", remote:GetFullName(), tostring(res))
+            return false, "serveur : " .. string.sub(tostring(res), 1, 60)
+        end
+        log("trade via %s -> %s (%s)", remote:GetFullName(),
+            tostring(res), typeof(res))
+
+        -- Un service renvoie rarement juste true : souvent false, ou une
+        -- table {success=..., reason=...}. On lit ce qu'on peut au lieu de
+        -- crier victoire des que l'appel n'a pas leve d'erreur.
         if res == false then return false, "le serveur a refuse l'invitation" end
+        if type(res) == "table" then
+            local why = res.reason or res.message or res.error or res.Reason
+            if res.success == false or res.ok == false or why then
+                return false, "serveur : " .. tostring(why or "refuse")
+            end
+        end
+        if type(res) == "string" and res ~= "" then
+            return false, "serveur : " .. string.sub(res, 1, 60)
+        end
         return true, "invitation envoyee"
     end
 
-    if not pcall(function() remote:FireServer(player) end) then
+    if not pcall(function() remote:FireServer(arg) end) then
         return false, "le remote a refuse l'appel"
     end
     log("trade via %s", remote:GetFullName())
@@ -1651,6 +1728,9 @@ function Movement.goTo(position, label)
         if not pcall(function() root.CFrame = CFrame.new(dest) end) then
             return false, "deplacement refuse"
         end
+        -- La vitesse d'avant le saut survit au changement de CFrame et se
+        -- transforme en degats de chute a l'arrivee : on la remet a zero.
+        pcall(function() root.AssemblyLinearVelocity = Vector3.new() end)
         return true, "arrive chez " .. tostring(label or "?")
     end
 
@@ -1659,10 +1739,27 @@ function Movement.goTo(position, label)
     local speed = math.max(20, tonumber(CONFIG.TeleportSpeed) or 120)
 
     spawnTask(function()
+        local hum = char:FindFirstChildOfClass("Humanoid")
+
+        -- Bloquer le HumanoidRootPart le temps du vol. Sans ca, deplacer le
+        -- CFrame a chaque frame laisse la gravite agir entre deux pas : le
+        -- personnage accumule une vitesse de chute enorme et se tue en
+        -- arrivant. C'est ce qui faisait mourir a chaque TP.
+        pcall(function() root.Anchored = true end)
+
+        local function release()
+            pcall(function()
+                root.AssemblyLinearVelocity = Vector3.new()
+                root.Anchored = false
+            end)
+        end
+
         while not State.Unloaded and Movement.token == mine do
             local c = LocalPlayer.Character
             local r = c and c:FindFirstChild("HumanoidRootPart")
-            if not r then break end
+            -- personnage remplace ou mort en route : on lache tout
+            if not r or r ~= root then release() return end
+            if hum and hum.Health <= 0 then release() return end
 
             local delta = dest - r.Position
             local dist = delta.Magnitude
@@ -1672,8 +1769,13 @@ function Movement.goTo(position, label)
             local step = math.min(dist, speed * dt)
             if not pcall(function()
                 r.CFrame = CFrame.new(r.Position + delta.Unit * step)
-            end) then break end
+            end) then release() return end
         end
+
+        -- Repose en douceur : on rend le controle au moteur, la chute
+        -- restante fait quelques studs et ne blesse pas.
+        release()
+        if hum then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end) end
     end)
     return true, "en route vers " .. tostring(label or "?")
 end
@@ -3991,29 +4093,6 @@ local function brainrotTile(scroll, entry, index)
         })
     end
 
-    -- Mutation et traits en bandeau SUR l'apercu 3D, pas en ligne de texte
-    -- sous le nom : ils appartiennent a la piece, et sous la vignette ils
-    -- volaient la place au nom et au revenu.
-    local extras = {}
-    if entry.mutation then extras[#extras + 1] = entry.mutation end
-    if entry.traits then extras[#extras + 1] = entry.traits end
-    if #extras > 0 then
-        local ribbon = corner(mk("Frame", {
-            Size = UDim2.new(0, size - 12, 0, 16),
-            Position = UDim2.new(0, 14, 0, size - 12),
-            BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.12,
-            BorderSizePixel = 0, ZIndex = 5, Parent = tile,
-        }), 8)
-        stroke(ribbon, THEME.good, 1, 0.4)
-        mk("TextLabel", {
-            Size = UDim2.new(1, -8, 1, 0), Position = UDim2.new(0, 4, 0, 0),
-            BackgroundTransparency = 1, ZIndex = 6, Font = Enum.Font.GothamBold,
-            Text = table.concat(extras, " / "), TextSize = 9,
-            TextColor3 = THEME.good,
-            TextTruncate = Enum.TextTruncate.AtEnd, Parent = ribbon,
-        })
-    end
-
     mk("TextLabel", {
         Size = UDim2.new(1, -12, 0, 15), Position = UDim2.new(0, 6, 0, size + 10),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = entry.name,
@@ -4590,6 +4669,10 @@ switch(cardPlayers, "Autoriser le TP vers une base", "AllowTeleport", function()
     if UI.refreshMode then UI.refreshMode() end
 end)
 switch(cardPlayers, "TP instantane (bien plus voyant)", "InstantTeleport")
+
+-- Si l'invitation ne part pas, c'est presque toujours l'argument attendu
+-- par le service qui differe. Les trois formes se testent d'ici.
+listPicker(cardPlayers, "Argument du trade", Trade.args, "TradeArgument", tostring)
 slider(cardPlayers, "Vitesse du TP", "TeleportSpeed", 40, 400, " st/s")
 
 do
