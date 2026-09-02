@@ -19,10 +19,14 @@
       - hookmetamethod sur __namecall
         -> detectable cote client, quoi qu'on en fasse.
 
-    3 onglets, fenetre en format paysage :
-      JOUEURS  - la liste a gauche, la base du joueur choisi a droite
-      CHAT     - la conversation traduite a gauche, les langues a droite
-      REGLAGES - police des messages, avatars, taille des apercus 3D
+    Fenetre en format portrait (380 x 660), onglets en bas comme dans une
+    app mobile. Les icones sont dessinees avec des Frames (cercles,
+    rectangles arrondis, rotations) : aucun caractere special, donc rien
+    qui casse selon la police du client.
+
+      JOUEURS  - la liste du serveur, puis la base du joueur choisi
+      CHAT     - la langue detectee, la conversation traduite, la saisie
+      REGLAGES - langues, police des messages, avatars, taille des apercus
 
     Touche menu : RightControl
 ==================================================================================
@@ -91,7 +95,7 @@ local CONFIG = {
     ShowAvatars  = true,
     ShowModels   = true,
     ChatFont     = POLICE_CHAT,   -- police des messages (onglet Reglages)
-    ModelSize    = 110,         -- taille de l'apercu 3D des brainrots (px)
+    ModelSize    = 100,         -- taille de l'apercu 3D des brainrots (px)
 
     -- decor de la base pris a tort pour un brainrot : compare en minuscules,
     -- en sous-chaine. Ajoute-en si le scanner ramene encore du mobilier.
@@ -1437,20 +1441,24 @@ end
 ----------------------------------------------------------------------------------
 -- INTERFACE : theme + composants
 ----------------------------------------------------------------------------------
+-- Ambre sur bleu encre : un hub de trade est un terminal de marche, pas une
+-- interface de gamer violette. Le menthe ne sert QU'A l'etat "en ligne",
+-- le rose QU'A ce qui supprime. L'accent ne se depense qu'une fois par ecran.
 local THEME = {
-    bg      = Color3.fromRGB(12, 13, 18),
-    surface = Color3.fromRGB(18, 20, 27),
-    card    = Color3.fromRGB(24, 26, 35),
-    cardHi  = Color3.fromRGB(32, 35, 47),
-    line    = Color3.fromRGB(42, 45, 60),
-    text    = Color3.fromRGB(240, 242, 250),
-    sub     = Color3.fromRGB(134, 141, 165),
-    accent  = Color3.fromRGB(139, 108, 255),
-    accent2 = Color3.fromRGB(0, 216, 190),
-    good    = Color3.fromRGB(78, 216, 148),
+    bg      = Color3.fromRGB(11, 15, 26),    -- encre, fond de fenetre
+    surface = Color3.fromRGB(14, 20, 34),    -- creux : champs, panneaux
+    card    = Color3.fromRGB(20, 26, 42),    -- corps des cartes
+    cardHi  = Color3.fromRGB(28, 36, 56),    -- element souleve
+    line    = Color3.fromRGB(42, 51, 80),    -- filet
+    text    = Color3.fromRGB(232, 237, 247),
+    sub     = Color3.fromRGB(122, 135, 166),
+    dim     = Color3.fromRGB(93, 106, 135),  -- texte d'origine sous la traduction
+    accent  = Color3.fromRGB(255, 179, 61),  -- ambre : l'accent principal
+    accent2 = Color3.fromRGB(199, 127, 20),  -- ambre profond : degrades et relief
+    good    = Color3.fromRGB(79, 224, 168),  -- menthe : en ligne / reussite
     warn    = Color3.fromRGB(255, 190, 92),
-    bad     = Color3.fromRGB(255, 96, 112),
-    msg     = Color3.fromRGB(255, 92, 98),   -- texte des messages du chat
+    bad     = Color3.fromRGB(255, 107, 122), -- rose : supprimer / erreur
+    msg     = Color3.fromRGB(232, 237, 247), -- texte des messages du chat
 }
 
 UI = { pages = {}, tabs = {} }
@@ -1482,11 +1490,16 @@ local function stroke(inst, color, thickness, transparency)
     })
 end
 
--- 3D depth effect: layered strokes for 3D appearance
-local function depth3D(inst, baseColor, glowColor)
-    local s1 = stroke(inst, baseColor or THEME.line, 0.8, 0.4)
-    local s2 = stroke(inst, glowColor or THEME.accent2, 0.4, 0.7)
-    return s1, s2
+-- Le relief ne vient pas d'empiler des contours : Roblox n'applique qu'un
+-- seul UIStroke par objet. Il vient d'un liseré clair pose en haut a
+-- l'interieur, qui simule la lumiere rasante.
+local function topLight(inst, transparency)
+    return mk("Frame", {
+        Size = UDim2.new(1, -16, 0, 1), Position = UDim2.new(0, 8, 0, 1),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BackgroundTransparency = transparency or 0.9,
+        BorderSizePixel = 0, ZIndex = 0, Parent = inst,
+    })
 end
 
 -- contour degrade violet -> turquoise qui tourne lentement
@@ -1541,39 +1554,103 @@ local function sweepBar(parent, height)
     return bar
 end
 
--- equerres de coin facon viseur
-local function corners(parent, size, thick, color)
-    size, thick = size or 14, thick or 2
-    local spots = {
-        { UDim2.new(0, 0, 0, 0), 1, 1 }, { UDim2.new(1, 0, 0, 0), -1, 1 },
-        { UDim2.new(0, 0, 1, 0), 1, -1 }, { UDim2.new(1, 0, 1, 0), -1, -1 },
-    }
-    local made = {}
-    for _, spot in ipairs(spots) do
-        local at, sx, sy = spot[1], spot[2], spot[3]
-        local h = mk("Frame", {
-            Size = UDim2.new(0, size, 0, thick),
-            Position = at + UDim2.new(0, sx > 0 and 0 or -size, 0, sy > 0 and 0 or -thick),
-            BackgroundColor3 = color or THEME.accent2, BorderSizePixel = 0,
-            ZIndex = 20, Parent = parent,
+----------------------------------------------------------------------------------
+-- ICONES DESSINEES
+--
+-- Zero caractere special : chaque icone est un assemblage de Frames avec un
+-- UICorner et parfois une Rotation. Les coordonnees sont donnees dans un
+-- carre de reference de 22x22, puis mises a l'echelle de la taille demandee.
+-- Chaque constructeur renvoie { holder = Frame, parts = { Frame... } } pour
+-- pouvoir recolorer l'icone entiere d'un coup.
+----------------------------------------------------------------------------------
+local ICON_BASE = 22
+
+local function iconMaker(build)
+    return function(parent, size, color)
+        size = size or ICON_BASE
+        local s = size / ICON_BASE
+        local holder = mk("Frame", {
+            Size = UDim2.new(0, size, 0, size),
+            BackgroundTransparency = 1, Parent = parent,
         })
-        local v = mk("Frame", {
-            Size = UDim2.new(0, thick, 0, size),
-            Position = at + UDim2.new(0, sx > 0 and 0 or -thick, 0, sy > 0 and 0 or -size),
-            BackgroundColor3 = color or THEME.accent2, BorderSizePixel = 0,
-            ZIndex = 20, Parent = parent,
-        })
-        made[#made + 1] = h
-        made[#made + 1] = v
+        local parts = {}
+
+        -- x, y, w, h en unites de la grille 22x22 ; r = rayon ; rot = degres
+        local function piece(x, y, w, h, r, rot)
+            local f = mk("Frame", {
+                Size = UDim2.new(0, w * s, 0, h * s),
+                Position = UDim2.new(0, x * s, 0, y * s),
+                BackgroundColor3 = color or THEME.sub,
+                BorderSizePixel = 0, Rotation = rot or 0, Parent = holder,
+            })
+            if r and r > 0 then corner(f, math.max(1, r * s)) end
+            parts[#parts + 1] = f
+            return f
+        end
+
+        -- anneau : un Frame vide dont seul le contour est visible
+        local function ring(x, y, d, thick)
+            local f = mk("Frame", {
+                Size = UDim2.new(0, d * s, 0, d * s),
+                Position = UDim2.new(0, x * s, 0, y * s),
+                BackgroundTransparency = 1, BorderSizePixel = 0, Parent = holder,
+            })
+            corner(f, (d * s) / 2)
+            local st = stroke(f, color or THEME.sub, math.max(1, thick * s), 0)
+            parts[#parts + 1] = st
+            return f
+        end
+
+        build(piece, ring)
+        return { holder = holder, parts = parts }
     end
-    Pulse.add(function(t)
-        if not made[1] or not made[1].Parent then return false end
-        local a = 0.25 + 0.35 * (0.5 + 0.5 * math.sin(t * 1.8))
-        for _, f in ipairs(made) do f.BackgroundTransparency = a end
-        return true
-    end)
-    return made
 end
+
+local Icon = {}
+
+-- deux tetes et deux epaules
+Icon.users = iconMaker(function(p)
+    p(2, 4, 7, 7, 3.5)
+    p(11, 3, 8, 8, 4)
+    p(1, 13, 9, 6, 3)
+    p(11, 12, 10, 7, 3.5)
+end)
+
+-- une bulle et sa queue
+Icon.chat = iconMaker(function(p)
+    p(1, 3, 19, 14, 6)
+    p(4, 14, 6, 6, 1, 20)
+end)
+
+-- trois curseurs a molette
+Icon.tune = iconMaker(function(p)
+    p(2, 5, 18, 2, 1)   p(12, 3, 6, 6, 3)
+    p(2, 10, 18, 2, 1)  p(4, 8, 6, 6, 3)
+    p(2, 15, 18, 2, 1)  p(9, 13, 6, 6, 3)
+end)
+
+-- chevron : deux barres qui se rejoignent a droite
+Icon.send = iconMaker(function(p)
+    p(4.6, 5.9, 11, 2.5, 1.2, 45)
+    p(4.6, 13.7, 11, 2.5, 1.2, -45)
+end)
+
+-- anneau ouvert par une pointe : recharger
+Icon.sync = iconMaker(function(p, ring)
+    ring(3, 3, 16, 2)
+    p(13, 2, 6, 2, 1, 45)
+end)
+
+-- croix
+Icon.cross = iconMaker(function(p)
+    p(4.5, 10, 13, 2, 1, 45)
+    p(4.5, 10, 13, 2, 1, -45)
+end)
+
+-- trait unique : reduire la fenetre
+Icon.minus = iconMaker(function(p)
+    p(6, 10, 10, 2, 1)
+end)
 
 local function pad(inst, all, top, bottom, left, right)
     return mk("UIPadding", {
@@ -1602,6 +1679,16 @@ local function tween(inst, props, time, style)
                 Enum.EasingDirection.Out), props)
     end)
     if ok and t then t:Play() return t end
+end
+
+-- recolore toutes les pieces d'une icone d'un coup
+-- (Frame -> son fond, UIStroke -> son contour)
+local function paintIcon(icon, color, time)
+    if not icon then return end
+    for _, p in ipairs(icon.parts) do
+        if p:IsA("UIStroke") then tween(p, { Color = color }, time or 0.16)
+        else tween(p, { BackgroundColor3 = color }, time or 0.16) end
+    end
 end
 
 -- tete du joueur (miniature Roblox)
@@ -1738,125 +1825,127 @@ local screen = mk("ScreenGui", {
 Maid.inst(screen)
 if syn and syn.protect_gui then pcall(syn.protect_gui, screen) end
 
-local WIN_W, WIN_H = 820, 360
+-- Format portrait : les onglets descendent en bas comme dans une app mobile,
+-- ce qui rend toute la largeur au contenu.
+--   52 (titre) + 518 (corps) + 64 (onglets) + 26 (statut) = 660
+local WIN_W, WIN_H = 380, 660
+local BAR_H, TABS_H, STAT_H = 52, 64, 26
 
 local window = corner(mk("Frame", {
     Size = UDim2.new(0, WIN_W, 0, WIN_H),
     Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -WIN_H / 2),
-    BackgroundColor3 = THEME.bg, BorderSizePixel = 0,
+    BackgroundColor3 = THEME.card, BorderSizePixel = 0,
     ClipsDescendants = true, Parent = screen,
-}), 14)
-glowStroke(window, 1.7, 0.08, 26)
-corners(window, 16, 2, THEME.accent2)
+}), 16)
+glowStroke(window, 1.5, 0.35, 20)
 
 local titleBar = mk("Frame", {
-    Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = THEME.surface,
+    Size = UDim2.new(1, 0, 0, BAR_H), BackgroundColor3 = THEME.cardHi,
     BorderSizePixel = 0, Parent = window,
 })
-mk("UIGradient", { Color = ColorSequence.new(THEME.surface, THEME.card),
+mk("UIGradient", { Color = ColorSequence.new(THEME.cardHi, THEME.card),
     Rotation = 90, Parent = titleBar })
 sweepBar(titleBar, 2)
 
--- le point de titre respire, avec un halo qui bat autour
+-- pastille "en ligne" : un point menthe qui respire dans son halo
 do
     local halo = corner(mk("Frame", {
-        Size = UDim2.new(0, 22, 0, 22), Position = UDim2.new(0, 12, 0.5, -11),
-        BackgroundColor3 = THEME.accent, BackgroundTransparency = 0.8,
+        Size = UDim2.new(0, 18, 0, 18), Position = UDim2.new(0, 12, 0.5, -9),
+        BackgroundColor3 = THEME.good, BackgroundTransparency = 0.86,
         BorderSizePixel = 0, Parent = titleBar,
-    }), 11)
+    }), 9)
     local dot = corner(mk("Frame", {
-        Size = UDim2.new(0, 10, 0, 10), Position = UDim2.new(0, 18, 0.5, -5),
-        BackgroundColor3 = THEME.accent, BorderSizePixel = 0, Parent = titleBar,
-    }), 5)
+        Size = UDim2.new(0, 8, 0, 8), Position = UDim2.new(0, 17, 0.5, -4),
+        BackgroundColor3 = THEME.good, BorderSizePixel = 0, Parent = titleBar,
+    }), 4)
     Pulse.add(function(t)
         if not halo.Parent then return false end
         local k = 0.5 + 0.5 * math.sin(t * 2.4)
-        local size = 18 + 10 * k
+        local size = 16 + 8 * k
         halo.Size = UDim2.new(0, size, 0, size)
-        halo.Position = UDim2.new(0, 23 - size / 2, 0.5, -size / 2)
-        halo.BackgroundTransparency = 0.72 + 0.22 * k
-        dot.BackgroundColor3 = THEME.accent:Lerp(THEME.accent2, k)
+        halo.Position = UDim2.new(0, 21 - size / 2, 0.5, -size / 2)
+        halo.BackgroundTransparency = 0.8 + 0.16 * k
         return true
     end)
 end
 
+-- Michroma existe dans Roblox : c'est ce qui donne au titre son air de
+-- terminal, sans avoir a le composer en majuscules espacees a la main.
 mk("TextLabel", {
-    Size = UDim2.new(0, 240, 1, 0), Position = UDim2.new(0, 36, 0, 0),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-    Text = "TRADE PLAZA HUB", TextSize = 13, TextColor3 = THEME.text,
+    Size = UDim2.new(0, 130, 1, 0), Position = UDim2.new(0, 34, 0, 0),
+    BackgroundTransparency = 1, Font = Enum.Font.Michroma,
+    Text = "TRADE PLAZA", TextSize = 11, TextColor3 = THEME.text,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = titleBar,
 })
 
 local modePill = corner(mk("Frame", {
-    Size = UDim2.new(0, 104, 0, 20), Position = UDim2.new(0, 176, 0.5, -10),
+    Size = UDim2.new(0, 84, 0, 20), Position = UDim2.new(0, 170, 0.5, -10),
     BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = titleBar,
 }), 10)
-stroke(modePill, THEME.good, 1, 0.3)
-depth3D(modePill, THEME.good, THEME.accent2)
+stroke(modePill, THEME.good, 1, 0.55)
 mk("TextLabel", {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-    Font = Enum.Font.GothamBold, Text = "lecture seule", TextSize = 10,
+    Font = Enum.Font.GothamBold, Text = "LECTURE SEULE", TextSize = 8,
     TextColor3 = THEME.good, Parent = modePill,
 })
 
-local function circleButton(offsetX, color, symbol, callback)
+-- bouton carre de la barre de titre, avec son icone dessinee
+local function chipButton(offsetX, color, iconFn, callback)
     local b = corner(mk("TextButton", {
-        Size = UDim2.new(0, 22, 0, 22), Position = UDim2.new(1, offsetX, 0.5, -11),
-        BackgroundColor3 = THEME.card, AutoButtonColor = false,
-        Font = Enum.Font.GothamBold, Text = symbol, TextSize = 12,
-        TextColor3 = color, BorderSizePixel = 0, Parent = titleBar,
-    }), 11)
+        Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(1, offsetX, 0.5, -12),
+        BackgroundColor3 = THEME.cardHi, AutoButtonColor = false, Text = "",
+        BorderSizePixel = 0, Parent = titleBar,
+    }), 8)
+    stroke(b, THEME.line, 1, 0.4)
+    local ic = iconFn(b, 14, color)
+    ic.holder.Position = UDim2.new(0.5, -7, 0.5, -7)
     Maid.conn(b.MouseEnter:Connect(function()
         tween(b, { BackgroundColor3 = color }, 0.15)
-        tween(b, { TextColor3 = THEME.bg }, 0.15)
+        paintIcon(ic, THEME.bg, 0.15)
     end))
     Maid.conn(b.MouseLeave:Connect(function()
-        tween(b, { BackgroundColor3 = THEME.card }, 0.15)
-        tween(b, { TextColor3 = color }, 0.15)
+        tween(b, { BackgroundColor3 = THEME.cardHi }, 0.15)
+        paintIcon(ic, color, 0.15)
     end))
     Maid.conn(b.MouseButton1Click:Connect(callback))
     return b
 end
 
 local bodyFrame = mk("Frame", {
-    Size = UDim2.new(1, 0, 1, -74), Position = UDim2.new(0, 0, 0, 46),
+    Size = UDim2.new(1, 0, 1, -(BAR_H + TABS_H + STAT_H)),
+    Position = UDim2.new(0, 0, 0, BAR_H),
     BackgroundTransparency = 1, Parent = window,
 })
 
-local sidebar = mk("Frame", {
-    Size = UDim2.new(0, 132, 1, 0), BackgroundColor3 = THEME.surface,
-    BorderSizePixel = 0, Parent = bodyFrame,
-})
-stroke(sidebar, THEME.line, 1, 0.3)
-depth3D(sidebar, THEME.line, THEME.accent2)
-listLayout(sidebar, 4)
-pad(sidebar, 10)
-
+-- en portrait le contenu occupe toute la largeur : plus de colonne laterale
 local contentArea = mk("Frame", {
-    Size = UDim2.new(1, -132, 1, 0), Position = UDim2.new(0, 132, 0, 0),
-    BackgroundTransparency = 1, Parent = bodyFrame,
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Parent = bodyFrame,
 })
 
-local statusBar = mk("Frame", {
-    Size = UDim2.new(1, 0, 0, 28), Position = UDim2.new(0, 0, 1, -28),
+local tabBar = mk("Frame", {
+    Size = UDim2.new(1, 0, 0, TABS_H), Position = UDim2.new(0, 0, 1, -(TABS_H + STAT_H)),
     BackgroundColor3 = THEME.surface, BorderSizePixel = 0, Parent = window,
 })
-stroke(statusBar, THEME.line, 1, 0.25)
-depth3D(statusBar, THEME.line, THEME.accent2)
+stroke(tabBar, THEME.line, 1, 0.55)
+listLayout(tabBar, 0, true)
+
+local statusBar = mk("Frame", {
+    Size = UDim2.new(1, 0, 0, STAT_H), Position = UDim2.new(0, 0, 1, -STAT_H),
+    BackgroundColor3 = THEME.bg, BorderSizePixel = 0, Parent = window,
+})
 local statusDot = corner(mk("Frame", {
-    Size = UDim2.new(0, 7, 0, 7), Position = UDim2.new(0, 16, 0.5, -3.5),
+    Size = UDim2.new(0, 5, 0, 5), Position = UDim2.new(0, 14, 0.5, -2.5),
     BackgroundColor3 = THEME.sub, BorderSizePixel = 0, Parent = statusBar,
-}), 4)
+}), 3)
 Pulse.add(function(t)
     if not statusDot.Parent then return false end
     statusDot.BackgroundTransparency = 0.15 * (0.5 + 0.5 * math.sin(t * 3.1))
     return true
 end)
-sweepBar(statusBar, 1).Position = UDim2.new(0, 0, 0, 0)
 local statusText = mk("TextLabel", {
-    Size = UDim2.new(1, -40, 1, 0), Position = UDim2.new(0, 30, 0, 0),
+    Size = UDim2.new(1, -34, 1, 0), Position = UDim2.new(0, 26, 0, 0),
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = "initialisation...",
-    TextSize = 11, TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
+    TextSize = 10, TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd, Parent = statusBar,
 })
 
@@ -1891,9 +1980,11 @@ end
 ----------------------------------------------------------------------------------
 -- COMPOSANTS
 ----------------------------------------------------------------------------------
-local function addTab(name, icon)
+local TAB_COUNT = 3
+
+local function addTab(name, iconFn)
     local page = mk("ScrollingFrame", {
-        Name = name, Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 12, 0, 8),
+        Name = name, Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
         ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(),
         Visible = false, Parent = contentArea,
@@ -1903,40 +1994,46 @@ local function addTab(name, icon)
         page.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 14)
     end))
 
-    local tab = corner(mk("TextButton", {
-        Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = THEME.card,
+    -- un onglet = un tiers de la barre, icone au-dessus du mot
+    local tab = mk("TextButton", {
+        Size = UDim2.new(1 / TAB_COUNT, 0, 1, 0), BackgroundColor3 = THEME.cardHi,
         BackgroundTransparency = 1, AutoButtonColor = false, Text = "",
-        BorderSizePixel = 0, Parent = sidebar,
-    }), 8)
-    local mark = corner(mk("Frame", {
-        Size = UDim2.new(0, 3, 0, 0), Position = UDim2.new(0, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = THEME.accent,
-        BorderSizePixel = 0, Parent = tab,
-    }), 2)
-    local tabIcon = mk("TextLabel", {
-        Size = UDim2.new(0, 20, 1, 0), Position = UDim2.new(0, 11, 0, 0),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = icon or "", TextSize = 16, TextColor3 = THEME.sub, Parent = tab,
-    })
-    local tabLabel = mk("TextLabel", {
-        Size = UDim2.new(1, -40, 1, 0), Position = UDim2.new(0, 36, 0, 0),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = name,
-        TextSize = 12, TextColor3 = THEME.sub,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd, Parent = tab,
+        BorderSizePixel = 0, Parent = tabBar,
     })
 
-    local tabGlow = glowStroke(tab, 1.4, 1, 34)
+    -- trait d'activation, colle en haut de l'onglet
+    local mark = corner(mk("Frame", {
+        Size = UDim2.new(0, 0, 0, 2), Position = UDim2.new(0.5, 0, 0, 0),
+        AnchorPoint = Vector2.new(0.5, 0), BackgroundColor3 = THEME.accent,
+        BorderSizePixel = 0, Parent = tab,
+    }), 1)
+
+    local tabIcon = iconFn(tab, 22, THEME.sub)
+    tabIcon.holder.Position = UDim2.new(0.5, -11, 0, 13)
+
+    local tabLabel = mk("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 0, 40),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = string.upper(name), TextSize = 9, TextColor3 = THEME.sub,
+        Parent = tab,
+    })
 
     UI.pages[name] = page
-    UI.tabs[name] = { button = tab, label = tabLabel, mark = mark,
-                      glow = tabGlow, icon = tabIcon }
+    UI.tabs[name] = { button = tab, label = tabLabel, mark = mark, icon = tabIcon }
 
     Maid.conn(tab.MouseEnter:Connect(function()
-        if not page.Visible then tween(tab, { BackgroundTransparency = 0.5 }, 0.15) end
+        if not page.Visible then
+            tween(tab, { BackgroundTransparency = 0.55 }, 0.15)
+            paintIcon(tabIcon, THEME.text, 0.15)
+            tween(tabLabel, { TextColor3 = THEME.text }, 0.15)
+        end
     end))
     Maid.conn(tab.MouseLeave:Connect(function()
-        if not page.Visible then tween(tab, { BackgroundTransparency = 1 }, 0.15) end
+        if not page.Visible then
+            tween(tab, { BackgroundTransparency = 1 }, 0.15)
+            paintIcon(tabIcon, THEME.sub, 0.15)
+            tween(tabLabel, { TextColor3 = THEME.sub }, 0.15)
+        end
     end))
     Maid.conn(tab.MouseButton1Click:Connect(function() UI.select(name) end))
     return page
@@ -1947,11 +2044,10 @@ function UI.select(name)
         local active = (tabName == name)
         page.Visible = active
         local t = UI.tabs[tabName]
-        tween(t.button, { BackgroundTransparency = active and 0 or 1 }, 0.16)
-        tween(t.label, { TextColor3 = active and THEME.accent2 or THEME.sub }, 0.16)
-        tween(t.mark, { Size = UDim2.new(0, 3, 0, active and 20 or 0) }, 0.18)
-        tween(t.glow, { Transparency = active and 0.25 or 1 }, 0.2)
-        tween(t.icon, { TextColor3 = active and THEME.accent2 or THEME.sub }, 0.16)
+        tween(t.button, { BackgroundTransparency = active and 0.82 or 1 }, 0.16)
+        tween(t.label, { TextColor3 = active and THEME.accent or THEME.sub }, 0.16)
+        tween(t.mark, { Size = UDim2.new(0, active and 34 or 0, 0, 2) }, 0.2)
+        paintIcon(t.icon, active and THEME.accent or THEME.sub, 0.16)
     end
 end
 
@@ -1961,16 +2057,7 @@ local function card(page, title, subtitle)
         BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = page,
     }), 12)
     stroke(holder, THEME.line, 1, 0.35)
-    depth3D(holder, THEME.line, THEME.accent2)
-
-    if title then
-        local accentLine = mk("Frame", {
-            Size = UDim2.new(0, 2, 0, 8), Position = UDim2.new(0, 0, 0, 12),
-            BackgroundColor3 = THEME.accent2, BorderSizePixel = 0, Parent = holder,
-        })
-        corner(accentLine, 1)
-    end
-
+    topLight(holder, 0.93)
     pad(holder, 14)
     listLayout(holder, 8)
 
@@ -2019,46 +2106,78 @@ local function btn(parent, opts)
     local base = (style == "primary" and THEME.accent)
         or (style == "danger" and THEME.bad) or THEME.cardHi
     local textColor = (style == "primary" or style == "danger") and THEME.bg or THEME.text
-    local hover = (style == "primary" and THEME.accent2)
-        or (style == "danger" and Color3.fromRGB(255, 140, 150)) or THEME.line
+    -- au survol on eclaircit, on n'assombrit pas : l'assombrissement est
+    -- reserve a l'enfoncement, plus bas.
+    local hover = (style == "primary" and Color3.fromRGB(255, 201, 112))
+        or (style == "danger" and Color3.fromRGB(255, 140, 150)) or THEME.cardHi
 
     local b = corner(mk("TextButton", {
         Size = opts.width and UDim2.new(0, opts.width, 0, opts.height or 32)
                           or UDim2.new(1, 0, 0, opts.height or 32),
-        BackgroundColor3 = base, AutoButtonColor = false, Font = Enum.Font.GothamBold,
-        Text = (opts.icon and (opts.icon .. "  ") or "") .. opts.text,
-        TextSize = opts.textSize or 12, TextColor3 = textColor,
+        BackgroundColor3 = base, AutoButtonColor = false, Text = "",
         BorderSizePixel = 0, ClipsDescendants = true, Parent = parent,
     }), 8)
+
+    -- L'icone est dessinee, pas ecrite. Le libelle vit dans son propre
+    -- TextLabel : un UIPadding sur le bouton decalerait aussi l'icone.
+    local hasText = opts.text ~= nil and opts.text ~= ""
+    local ic, labelX = nil, 0
+    if opts.icon then
+        local isize = opts.iconSize or 15
+        ic = opts.icon(b, isize, textColor)
+        if hasText then
+            ic.holder.Position = UDim2.new(0, 12, 0.5, -isize / 2)
+            labelX = 12 + isize + 8
+        else
+            -- bouton sans libelle : l'icone prend le centre
+            ic.holder.Position = UDim2.new(0.5, -isize / 2, 0.5, -isize / 2)
+        end
+    end
+    if hasText then
+        mk("TextLabel", {
+            Size = labelX > 0 and UDim2.new(1, -(labelX + 10), 1, 0)
+                              or UDim2.new(1, 0, 1, 0),
+            Position = UDim2.new(0, labelX, 0, 0),
+            BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+            Text = opts.text, TextSize = opts.textSize or 12,
+            TextColor3 = textColor,
+            TextXAlignment = labelX > 0 and Enum.TextXAlignment.Left
+                                         or Enum.TextXAlignment.Center,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = b,
+        })
+    end
 
     -- relief : un liseré clair en haut, une levre sombre en bas. Le bouton a
     -- une epaisseur au lieu d'etre un rectangle plat.
     local sheen = mk("Frame", {
         Size = UDim2.new(1, -10, 0, 1), Position = UDim2.new(0, 5, 0, 1),
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = 0.82,
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = 0.72,
         BorderSizePixel = 0, ZIndex = 0, Parent = b,
     })
     local lip = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 3), Position = UDim2.new(0, 0, 1, -3),
-        BackgroundColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 0.68,
+        BackgroundColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 0.62,
         BorderSizePixel = 0, ZIndex = 0, Parent = b,
     })
-    local halo = mk("UIStroke", {
-        Color = THEME.accent2, Thickness = 1.4, Transparency = 1,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = b,
-    })
-    if style == "ghost" then stroke(b, THEME.line, 1, 0.4) end
-    depth3D(b, THEME.line, THEME.accent2)
+    local halo
+    if style == "ghost" then
+        halo = stroke(b, THEME.line, 1, 0.4)
+    else
+        halo = stroke(b, base, 1.4, 1)
+    end
 
     Maid.conn(b.MouseEnter:Connect(function()
         tween(b, { BackgroundColor3 = hover }, 0.14)
-        tween(halo, { Transparency = 0.08, Thickness = 2.2 }, 0.16)
-        tween(sheen, { BackgroundTransparency = 0.6 }, 0.16)
+        tween(halo, { Color = THEME.accent, Transparency = 0.25, Thickness = 1.8 }, 0.16)
+        tween(sheen, { BackgroundTransparency = 0.5 }, 0.16)
     end))
     Maid.conn(b.MouseLeave:Connect(function()
         tween(b, { BackgroundColor3 = base }, 0.14)
-        tween(halo, { Transparency = 1, Thickness = 1.4 }, 0.22)
-        tween(sheen, { BackgroundTransparency = 0.82 }, 0.22)
+        tween(halo, {
+            Color = style == "ghost" and THEME.line or base,
+            Transparency = style == "ghost" and 0.4 or 1, Thickness = 1.4,
+        }, 0.22)
+        tween(sheen, { BackgroundTransparency = 0.72 }, 0.22)
     end))
     -- enfonce : la levre s'ecrase, le fond s'assombrit
     Maid.conn(b.MouseButton1Down:Connect(function()
@@ -2142,7 +2261,7 @@ local function slider(parent, text, key, minVal, maxVal, suffix, onChange)
         Size = UDim2.new(0, 96, 0, 16), Position = UDim2.new(1, -96, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = tostring(CONFIG[key]) .. (suffix or ""), TextSize = 11,
-        TextColor3 = THEME.accent2, TextXAlignment = Enum.TextXAlignment.Right, Parent = holder,
+        TextColor3 = THEME.accent, TextXAlignment = Enum.TextXAlignment.Right, Parent = holder,
     })
     local bar = corner(mk("Frame", {
         Size = UDim2.new(1, 0, 0, 8), Position = UDim2.new(0, 0, 0, 26),
@@ -2234,25 +2353,6 @@ local function hpanel(parent, height)
     return scroll, holder
 end
 
--- deux colonnes cote a cote : c'est ce qui rend le format paysage utile
-local function split(page, height, leftScale)
-    leftScale = leftScale or 0.5
-    local holder = mk("Frame", {
-        Size = UDim2.new(1, 0, 0, height), BackgroundTransparency = 1, Parent = page,
-    })
-    local left = mk("Frame", {
-        Size = UDim2.new(leftScale, -6, 1, 0), BackgroundTransparency = 1, Parent = holder,
-    })
-    listLayout(left, 10)
-    local right = mk("Frame", {
-        Size = UDim2.new(1 - leftScale, -6, 1, 0),
-        Position = UDim2.new(leftScale, 6, 0, 0),
-        BackgroundTransparency = 1, Parent = holder,
-    })
-    listLayout(right, 10)
-    return left, right
-end
-
 local function textLine(scroll, text, color, font)
     return mk("TextLabel", {
         Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
@@ -2300,7 +2400,7 @@ local function listPicker(parent, title, values, key, labelFn, onPick)
     local current = mk("TextLabel", {
         Size = UDim2.new(0.45, -34, 1, 0), Position = UDim2.new(0.55, 0, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = labelFn(CONFIG[key]), TextSize = 12, TextColor3 = THEME.accent2,
+        Text = labelFn(CONFIG[key]), TextSize = 12, TextColor3 = THEME.accent,
         TextXAlignment = Enum.TextXAlignment.Right,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
     })
@@ -2379,49 +2479,48 @@ local scanBase, refreshPlayers
 ----------------------------------------------------------------------------------
 -- ONGLET : JOUEURS  (la liste, et la base du joueur choisi juste en dessous)
 ----------------------------------------------------------------------------------
-local pagePlayers = addTab("Joueurs", "◆┃◆")
+local pagePlayers = addTab("Joueurs", Icon.users)
 
-local colPlayersL, colPlayersR = split(pagePlayers, 268, 0.38)
-
-local cardList = card(colPlayersL)
-local playersPanel = panel(cardList, 158)
-btn(cardList, { text = "Rafraichir", icon = "◁▣▷", callback = function()
+local cardList = card(pagePlayers)
+local playersPanel = panel(cardList, 176)
+btn(cardList, { text = "Rafraichir la liste", icon = Icon.sync, callback = function()
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
 end })
 
-local cardBase = card(colPlayersR, "Base")
+local cardBase = card(pagePlayers)
 local baseSummary = note(cardBase, "", THEME.text)
 local brainrotPanel, brainrotHolder = hpanel(cardBase, 190)
 
 local function playerRow(scroll, plr)
     local row = corner(mk("Frame", {
-        Size = UDim2.new(1, -6, 0, 48), BackgroundColor3 = THEME.card,
-        BackgroundTransparency = 0.2, BorderSizePixel = 0, Parent = scroll,
-    }), 8)
-    stroke(row, THEME.line, 1, 0.65)
+        Size = UDim2.new(1, -6, 0, 52), BackgroundColor3 = THEME.cardHi,
+        BorderSizePixel = 0, Parent = scroll,
+    }), 11)
+    stroke(row, THEME.line, 1, 0.5)
 
     local head = avatar(row, plr.UserId, 34)
-    head.Position = UDim2.new(0, 8, 0.5, -17)
+    head.Position = UDim2.new(0, 9, 0.5, -17)
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -156, 0, 15), Position = UDim2.new(0, 50, 0, 8),
+        Size = UDim2.new(1, -150, 0, 15), Position = UDim2.new(0, 51, 0, 11),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = plr.DisplayName ~= "" and plr.DisplayName or plr.Name, TextSize = 12,
         TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, -156, 0, 13), Position = UDim2.new(0, 50, 0, 25),
-        BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-        Text = "@" .. plr.Name .. "   -   " .. plr.UserId, TextSize = 10,
+        Size = UDim2.new(1, -150, 0, 13), Position = UDim2.new(0, 51, 0, 27),
+        BackgroundTransparency = 1, Font = Enum.Font.Code,
+        Text = "@" .. plr.Name, TextSize = 10,
         TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local see = btn(row, { text = "BASE", icon = "┏◈┓", width = 92,
-        height = 30, style = "primary", callback = function() scanBase(plr) end })
-    see.Position = UDim2.new(1, -100, 0.5, -15)
+    local see = btn(row, { text = "BASE", icon = Icon.send, iconSize = 12,
+        width = 86, height = 30, style = "primary",
+        callback = function() scanBase(plr) end })
+    see.Position = UDim2.new(1, -94, 0.5, -15)
     return row
 end
 
@@ -2465,7 +2564,6 @@ local function brainrotTile(scroll, entry, index)
         BackgroundTransparency = 1, BorderSizePixel = 0, Parent = scroll,
     }), 10)
     local tileStroke = stroke(tile, col, 1.5, 1)
-    depth3D(tile, col, THEME.accent2)
 
     local icon = modelIcon(tile, entry.model, size)
     icon.Position = UDim2.new(0, 8 + size / 2, 0, 8 + size / 2)
@@ -2522,7 +2620,7 @@ local function brainrotTile(scroll, entry, index)
         Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, size + 43),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = entry.total > 0 and ("$" .. Util.short(entry.total) .. "/s") or "-",
-        TextSize = 13, TextColor3 = THEME.accent2, Parent = tile,
+        TextSize = 13, TextColor3 = THEME.accent, Parent = tile,
     })
     return tile
 end
@@ -2567,27 +2665,43 @@ end
 ----------------------------------------------------------------------------------
 -- ONGLET : CHAT
 ----------------------------------------------------------------------------------
-local pageChat = addTab("Chat", "┌◇┐")
-
-local colChatL, colChatR = split(pageChat, 268, 0.58)
+local pageChat = addTab("Chat", Icon.chat)
 
 local refreshLangNote
 
-local cardLang = card(colChatR)
-listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function()
-    refreshLangNote()
-    if UI.redrawChat then UI.redrawChat() end
-end)
-listPicker(cardLang, "Repli si rien n'est detecte", LANGS, "SendAs", langName, function()
-    refreshLangNote()
-end)
+-- Bandeau de langue : ce qu'on a detecte chez l'autre, et la langue dans
+-- laquelle ta reponse va partir. Les deux selecteurs vivent dans Reglages :
+-- ici on ne garde que l'etat, c'est ce qu'on lit en pleine conversation.
+local langStrip = corner(mk("Frame", {
+    Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = THEME.surface,
+    BorderSizePixel = 0, Parent = pageChat,
+}), 10)
+stroke(langStrip, THEME.line, 1, 0.45)
 
-local detectNote = note(cardLang, "", THEME.accent2)
+local detectFrom = mk("TextLabel", {
+    Size = UDim2.new(0, 96, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+    BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "-",
+    TextSize = 11, TextColor3 = THEME.good,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = langStrip,
+})
+mk("Frame", {
+    Size = UDim2.new(0, 40, 0, 1), Position = UDim2.new(0, 114, 0.5, 0),
+    BackgroundColor3 = THEME.line, BorderSizePixel = 0, Parent = langStrip,
+})
+local detectTo = mk("TextLabel", {
+    Size = UDim2.new(0, 140, 1, 0), Position = UDim2.new(1, -152, 0, 0),
+    BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "-",
+    TextSize = 11, TextColor3 = THEME.accent,
+    TextXAlignment = Enum.TextXAlignment.Right,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = langStrip,
+})
 
 refreshLangNote = function()
-    local lang, fromDetection = Chat.replyLang()
-    detectNote.Text = (State.LastDetected and langName(State.LastDetected) or "-")
-        .. " → " .. langName(lang)
+    local lang = Chat.replyLang()
+    detectFrom.Text = State.LastDetected and langName(State.LastDetected) or "en attente"
+    detectFrom.TextColor3 = State.LastDetected and THEME.good or THEME.sub
+    detectTo.Text = "tu reponds en " .. langName(lang)
 end
 
 -- appele par le traducteur des qu'un fournisseur nous rend la langue source
@@ -2605,11 +2719,11 @@ end
 
 refreshLangNote()
 
-local cardConv = card(colChatL)
-local chatPanel = panel(cardConv, 120)
+local cardConv = card(pageChat)
+local chatPanel = panel(cardConv, 326)
 
 local sendReply
-local chatField = field(cardConv, "Écris...",
+local chatField = field(cardConv, "Ecris dans ta langue...",
     function(text) if sendReply then sendReply(text) end end)
 local rowSend = rowOf(cardConv, 36)
 
@@ -2633,9 +2747,9 @@ sendReply = function(text)
     end
 end
 
-btn(rowSend, { text = "ENVOYER", icon = "▲┃▲", width = 150, height = 36,
+btn(rowSend, { text = "ENVOYER", icon = Icon.send, width = 232, height = 36,
     style = "primary", callback = function() sendReply(chatField.Text) end })
-btn(rowSend, { text = "Effacer", icon = "╳", width = 118, height = 36,
+btn(rowSend, { text = "", icon = Icon.cross, iconSize = 16, width = 94, height = 36,
     callback = function()
         chatField.Text = ""
         State.ChatLog = {}
@@ -2661,18 +2775,27 @@ local function chatWidth()
     return 340
 end
 
--- Une ligne = qui parle (tete + pseudo) et ce qu'il dit, rien d'autre.
+-- Une ligne = qui parle (tete + pseudo) et ce qu'il dit.
 -- Pour tes propres messages on montre ce que TU as tape, pas la traduction
--- partie chez l'autre.
+-- partie chez l'autre. Pour les autres, la traduction en grand et, dessous
+-- en petit, ce qu'ils ont vraiment ecrit : sans ca on lit une paraphrase
+-- sans jamais pouvoir la verifier.
 local function chatRow(scroll, entry)
     local body = tostring(entry.mine and entry.original
         or (entry.translated or entry.original) or "")
     if body == "" then return end
 
+    local orig = nil
+    if not entry.mine and entry.translated and entry.original
+    and Util.trim(entry.translated) ~= Util.trim(entry.original) then
+        orig = tostring(entry.original)
+    end
+
     local font  = chatFont()
     local textW = math.max(120, chatWidth() - 58)
     local msgH  = textHeight(body, font, 15, textW) + 4
-    local rowH  = math.max(34, 17 + msgH) + 8
+    local origH = orig and (textHeight(orig, Enum.Font.Gotham, 11, textW) + 3) or 0
+    local rowH  = math.max(34, 17 + msgH + origH) + 8
 
     -- la ligne s'ouvre en hauteur pendant que le texte apparait
     local row = mk("Frame", {
@@ -2716,6 +2839,17 @@ local function chatRow(scroll, entry)
         TextTransparency = 0,
         Position = UDim2.new(0, 40, 0, 17),
     }, 0.34)
+
+    if orig then
+        local origLbl = mk("TextLabel", {
+            Size = UDim2.new(1, -46, 0, origH), Position = UDim2.new(0, 40, 0, 17 + msgH),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = orig,
+            TextSize = 11, TextColor3 = THEME.dim, TextWrapped = true,
+            TextTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, Parent = row,
+        })
+        tween(origLbl, { TextTransparency = 0.15 }, 0.4)
+    end
     return row
 end
 
@@ -2752,14 +2886,25 @@ end
 ----------------------------------------------------------------------------------
 -- ONGLET : REGLAGES
 ----------------------------------------------------------------------------------
-local pageSettings = addTab("Reglages", "✦┆✦")
+local pageSettings = addTab("Reglages", Icon.tune)
 
-local cardStyle = card(pageSettings)
-listPicker(cardStyle, "Police", CHAT_FONTS, "ChatFont", tostring, function()
+-- Les deux langues vivent ici, pas dans le Chat : on les choisit une fois,
+-- alors qu'on lit le bandeau de langue a chaque message.
+local cardLang = card(pageSettings, "Langues")
+listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function()
+    refreshLangNote()
+    if UI.redrawChat then UI.redrawChat() end
+end)
+listPicker(cardLang, "Repli si rien n'est detecte", LANGS, "SendAs", langName, function()
+    refreshLangNote()
+end)
+
+local cardStyle = card(pageSettings, "Chat")
+listPicker(cardStyle, "Police des messages", CHAT_FONTS, "ChatFont", tostring, function()
     if UI.redrawChat then UI.redrawChat() end
 end)
 
-local cardDisplay = card(pageSettings)
+local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
 slider(cardDisplay, "Taille de l'apercu 3D", "ModelSize", 48, 220, " px", function()
@@ -2770,22 +2915,23 @@ end)
 -- BOUTONS FENETRE / RACCOURCI / UNLOAD
 ----------------------------------------------------------------------------------
 local minimized = false
-circleButton(-62, THEME.warn, "-", function()
+chipButton(-58, THEME.warn, Icon.minus, function()
     minimized = not minimized
     bodyFrame.Visible = not minimized
+    tabBar.Visible = not minimized
     statusBar.Visible = not minimized
-    tween(window, { Size = UDim2.new(0, WIN_W, 0, minimized and 46 or WIN_H) }, 0.2)
+    tween(window, { Size = UDim2.new(0, WIN_W, 0, minimized and BAR_H or WIN_H) }, 0.2)
 end)
-circleButton(-32, THEME.bad, "X", function()
+chipButton(-28, THEME.bad, Icon.cross, function()
     if GENV.TradePlazaHub and GENV.TradePlazaHub.Unload then GENV.TradePlazaHub.Unload() end
 end)
 
 local floating = corner(mk("TextButton", {
-    Size = UDim2.new(0, 46, 0, 46), Position = UDim2.new(0, 18, 1, -64),
-    BackgroundColor3 = THEME.accent, AutoButtonColor = false, Font = Enum.Font.GothamBold,
-    Text = "TP", TextSize = 14, TextColor3 = THEME.bg, BorderSizePixel = 0,
+    Size = UDim2.new(0, 48, 0, 48), Position = UDim2.new(0, 18, 1, -66),
+    BackgroundColor3 = THEME.accent, AutoButtonColor = false, Font = Enum.Font.Michroma,
+    Text = "TP", TextSize = 12, TextColor3 = THEME.bg, BorderSizePixel = 0,
     Visible = false, Parent = screen,
-}), 23)
+}), 24)
 stroke(floating, THEME.accent2, 1.5, 0.3)
 
 local function setWindowVisible(visible)
@@ -2816,7 +2962,7 @@ GENV.TradePlazaHub = {
 ----------------------------------------------------------------------------------
 UI.select("Joueurs")
 
-window.Size = UDim2.new(0, WIN_W - 50, 0, WIN_H - 34)
+window.Size = UDim2.new(0, WIN_W - 30, 0, WIN_H - 52)
 tween(window, { Size = UDim2.new(0, WIN_W, 0, WIN_H) }, 0.3, Enum.EasingStyle.Back)
 
 Maid.conn(Players.PlayerAdded:Connect(function()
