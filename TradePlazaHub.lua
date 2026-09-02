@@ -97,6 +97,19 @@ local CONFIG = {
     ChatFont     = POLICE_CHAT,   -- police des messages (onglet Reglages)
     ModelSize    = 140,         -- taille de l'apercu 3D des brainrots (px)
 
+    -- Filtre de la base : decoche un palier dans Reglages et ses pieces
+    -- disparaissent de l'affichage. Pratique pour ne voir que le haut du
+    -- panier chez un joueur qui a trois cents communes.
+    ShowCommon    = true,
+    ShowRare      = true,
+    ShowEpic      = true,
+    ShowLegendary = true,
+    ShowMythic    = true,
+    ShowGod       = true,
+    ShowSecret    = true,
+    ShowOG        = true,
+    ShowUnknown   = true,   -- pieces dont on n'a pas pu lire la rarete
+
     -- Rayon de lecture au Trade Plaza (en studs). Cette carte n'a pas de
     -- conteneur "Plots" : les brainrots sont poses autour du joueur, donc on
     -- lit ce qui se trouve dans ce rayon autour de lui. Monte-le si son
@@ -596,9 +609,213 @@ local GENERIC_NAMES = {
     main = true, purchase = true, purchases = true, object = true, base = true,
     primary = true, podium = true, spawn = true, floor = true, hitbox = true,
 }
+----------------------------------------------------------------------------------
+-- CATALOGUE DES BRAINROTS
+--
+-- Les paliers du moins bon au plus rare, et dans chaque palier les pieces
+-- rangees de la meilleure a la moins bonne (l'ordre des revenus du jeu).
+--
+-- A quoi ca sert : beaucoup de bases n'exposent AUCUN tag de rarete lisible.
+-- Sans ce catalogue le tri retombait sur le seul revenu affiche, et une piece
+-- dont le jeu ne montre rien finissait en bas. Ici le nom suffit a la classer.
+--
+-- Les noms sont compares en minuscules, sans accents ni ponctuation, donc
+-- "Los Tralaleritos", "los tralaleritos" et "LosTralaleritos" se rejoignent.
+-- Le jeu en sort de nouveaux en permanence : ajoute-les dans le bon palier.
+----------------------------------------------------------------------------------
+local BRAINROT_TIERS = {
+    { tier = "common", names = {
+        "Holy Arepa", "Pipi Corni", "Pipi Kiwi", "Tartaragno", "Raccooni Jandelini",
+        "Noobini Santanini", "Svinina Bombardino", "Talpa Di Fero", "Fluriflura", "Tim Cheese",
+        "Noobini Pizzanini",
+    } },
+    { tier = "rare", names = {
+        "Pinealotto Fruttarino", "Pengolino Nuvoletto", "Pipi Avocado", "Frogo Elfo",
+        "Tric Trac Baraboom", "Cupcake Koala", "Ta Ta Ta Ta Sahur", "Cacto Hipopotamo",
+        "Boneca Ambalabu", "Bandito Bobritto", "Gangster Footera", "Trippi Troppi",
+    } },
+    { tier = "epic", names = {
+        "Bandito Axolito", "Mummio Rappitto", "Penguino Cocosino", "Wombo Rollo",
+        "Penguin Tree", "Doi Doi Do", "Gato Celesto", "Salamino Penguino", "Frogato Pirato",
+        "Mangolini Parrocini", "Avocadini Guffo", "Ti Ti Ti Sahur",
+        "Brri Brri Bicus Dicus Bombicus", "Perochello Lemonchello", "Bananita Dolphinita",
+        "Malame Amarele", "Bambini Crostini", "Trulimero Trulicina", "Avocadini Antilopini",
+        "Brr Brr Patapim", "Cappuccino Assassino",
+    } },
+    { tier = "legendary", names = {
+        "Seraphino Gruyero", "Buho de Fuego", "Electro Quacko", "Sealo Regalo", "Sigma Girl",
+        "Puffaball", "Chocco Bunny", "Buho del Cielo", "Sigma Boy", "Pi Pi Watermelon",
+        "Quackula", "Pandaccini Bananini", "Cocosini Mama", "Strawberrelli Flamingelli",
+        "Pipi Potato", "Caramello Filtrello", "Blueberrinni Octopusini", "Clickerino Crabo",
+        "Quivioli Ameleonni", "Glorbo Fruttodrillo", "Lionel Cactuseli", "Chef Crabracadabra",
+        "Ballerina Cappuccina", "Chimpanzini Bananini", "Burbaloni Loliloli",
+    } },
+    { tier = "mythic", names = {
+        "Orbi Mochi", "Bucketoro", "Berenjello Angello", "Fizzy Soda", "Tree Tree Tree Sahur",
+        "Bananito Bandito", "Jacko Spaventosa", "Toiletto Focaccino", "Centrucci Nuclucci",
+        "Carrotini Brainini", "Cocoteddy", "Harpuccino", "Bee Loco", "Carloo",
+        "Cachorrito Melonito", "Spongini Quackini", "Los Noobinis", "Jingle Jingle Sahur",
+        "Tracoducotulu Delapeladustuz", "Magi Ribbitini", "Crocodildo Penisini",
+        "Rhino Helicopterino", "Te Te Te Sahur", "Ganganzelli Trulala", "Lerulerulerule",
+        "Tob Tobi Tobi", "Gorillo Watermelondrillo", "Stoppo Luminino", "Gorillo Subwoofero",
+        "Cavallo Virtuoso", "Avocadorilla", "Tigrilini Watermelini", "Zibra Zubra Zibralini",
+        "Bombombini Gusini", "Spioniro Golubiro", "Brutto Gialutto", "Bombardiro Crocodilo",
+        "Rhino Toasterino", "Orangutini Ananassini", "Frigo Camelo", "Ganganzelli Turlala",
+        "Mythic Lucky Block",
+    } },
+    { tier = "brainrot god", names = {
+        "Pretzo Robo", "Tenini Ballini", "Robo Grafito", "Flippo Marino", "Beavo Potto",
+        "Dumborino Miracello", "Eggdin Egg Egg Dun", "Clovkur Kurkur", "Appelini",
+        "Karkerheart Luvkur", "Pop Pop Sahur", "Dolphini Jetskini", "Pandanini Frostini",
+        "Ginger Cisterna", "Tentacolo Tecnico", "Cocoa Assassino", "Belula Beluga",
+        "Krupuk Pagi Pagi", "Skull Skull Skull", "Patteo", "Brasilini Berimbini",
+        "Cappuccino Clownino", "Luv Luv Luv", "Anpali Babel", "Astrolero Cervalero",
+        "Lemonita Splashita", "Noo La Polizia", "Chrismasmamat", "Bambu Bambu Sahur",
+        "Cola Cat", "Los Gattitos", "Mastodontico Telepiedone", "Boba Panda", "Bunny Tralala",
+        "Piccionetta Macchina", "Piccionetta Machina", "Buho de Noelo", "Frio Ninja",
+        "Lumaca Malefica", "Granchiello Spiritell", "Los Tipi Tacos", "Tootini Shrimpini",
+        "Ginger Globo", "Yeti Claus", "Lazy Ducky", "Trenoturbo Axolotrico 9000",
+        "Corn Corn Corn Sahur", "Mummy Ambalabu", "Snailenzo", "Squalanana",
+        "Tartaruga Cisterna", "Aquanaut", "Cacasito Satalito", "Orcalita Orcala",
+        "Crabbo Limonetta", "Los Orcalitos", "Tractoro Dinosauro", "Bombardini Tortinii",
+        "Brr es Teh Patipum", "Pakrahmatmatina", "Piccione Macchina", "Los Bombinitos",
+        "Ballerina Peppermintina", "Pakrahmatmamat", "Los Tungtungtungcitos",
+        "Bulbito Bandito Traktorito", "Ballerino Lololo", "Pineaplino", "Las Capuchinas",
+        "Sundrilla Sundae", "Trippi Troppi Troppa Trippa", "Gattito Tacoto", "Divino Platypio",
+        "Los Chihuaninis", "Capi Taco", "Jacko Jack Jack", "Trenostruzzo Turbo 3000",
+        "Urubini Flamenguini", "Extinct Ballerina", "Vampira Cappuccina", "Vampira Cappucina",
+        "Orcalero Orcala", "Tralalita Tralala", "Tukanno Bananno", "Alessio",
+        "Odin Din Din Dun", "Tipi Topi Taco", "Unclito Samito", "Espresso Signora",
+        "Money Money Man", "Tigroligre Frutonni", "Los Crocodillitos", "Matteo",
+        "Tralalero Tralala", "Chihuanini Taconini", "Gattatino Neonino", "Gattatino Nyanino",
+        "Girafa Celestre", "Cocofanto Elefanto", "Brainrot God Lucky Block",
+        "Statutino Libertino", "Trenotubo Axolotrico 9000",
+    } },
+    { tier = "secret", names = {
+        "Griffin", "Dragon Aquanini", "Dragon Gingerini", "Hydra Dragon Cannelloni",
+        "Signore Carapace", "Dragon Cannelloni", "Love Love Bear", "Moby Bros", "Arcadragon",
+        "Digi Narwhal", "Kraken", "La Supreme Combinasion", "Elefanto Frigo", "Hydra Bunny",
+        "Celestial Pegasus", "Cerberus", "Jelly Moby", "Bumbatron", "Bunny and Eggy",
+        "Popcuru and Fizzuru", "Rosey and Teddy", "Capitano Moby", "Cooki and Milki",
+        "Orchidox", "Burguro and Fryuro", "Los Secret Combinasionas", "Ketupat Bros",
+        "Reinito Sleighito", "Fortunu and Cashuru", "Los Amigos", "Pizza and Ranch", "Antonio",
+        "La Secret Combinasion", "Pancake and Syrup", "Fishino Clownino", "Foxini Lanternini",
+        "Kalika Bros", "Los Sekolahs", "Sammyni Truckini", "Cash or Card",
+        "Fragrama and Chocrama", "La Casa Boo", "La Fuse Machine", "Los Admins", "Duggy Bros",
+        "La Food Combinasion", "Yetimatic", "S'more Serat", "Sammyni Cakini", "Boppin Bunny",
+        "Spooky and Pumpky", "Cangurato Gelato", "Ginger Gerat", "La Ginger Sekolah",
+        "Los Chillis", "Los Hackers", "Capitano Americano", "Rubiko and Kubiko", "Examen Bros",
+        "Los Spaghettis", "Rubrikiko", "Sammyni Fattini", "Festive 67", "Guest 666",
+        "Quackini Snackini", "Queen Bee", "Ventoliero Pavonero", "Grabatron",
+        "Pop Pop Petalini", "Cloverat Clapat", "La Summer Grande", "Los Tictacs",
+        "Spaghetti Tualetti", "Candini Fluffini", "Caylusaurus", "Hopilikalika Hopilikalako",
+        "La Easter Grande", "Polaroidini", "Steakini Fattini", "Garama and Madundung",
+        "La Anniversary Grande", "Nacho Spyder", "Rosetti Tualetti", "Nachorilla",
+        "Scorpino Coasterino", "Money Money Bros", "Gold Gold Gold", "Jolly Jolly Sahur",
+        "Lavadorito Spinito", "Gym Bros", "Ketchuru and Musturu", "Los Tangcitos",
+        "Rico Dinero", "Tirilikalika Tirilikalako", "La Lucky Grande", "La Romantic Grande",
+        "Orcaledon", "Swaggy Bros", "Tictac Sahur", "Dug Dug Dug", "Ketupat Kepat",
+        "La Taco Combinasion", "Coco and Mango", "Tang Tang Keletang", "Abyssaloco",
+        "Esok Goala", "Fragola La La La", "Lovin Rose", "Bufalino Boomberino",
+        "Honey Honey Bear", "Los Tacoritas", "Eviledon", "Los Primos", "Puffino Builderino",
+        "Esok Sekolah", "La Jolly Grande", "Los Cupids", "Los Mariachis", "Los Puggies",
+        "W or L", "Globa Steppa", "Gobblino Uniciclino", "Noodle Noodle Poodle", "Tralaledon",
+        "Mieteteira Bicicleteira", "Tacoturbo Tacorito", "Tuff Toucan", "Chillin Chili",
+        "Chipso and Queso", "Money Money Reindeer", "La Spooky Grande", "Bacuru and Egguru",
+        "Los Bros", "La Extinct Grande", "Los Candies", "Celularcini Viciosini", "Los 67",
+        "Capitano Gullini", "Los Mobilis", "Churrito Bunnito", "Money Money Puggy",
+        "Cigno Fulgoro", "Los Hotspotsitos", "Los Jolly Combinasionas",
+        "Los Spooky Combinasionas", "Chicleteira Champeona", "Peschito Machito", "Los Planitos",
+        "Snailo Clovero", "Chicleteira Cupideira", "DJ Panda", "Las Sis", "Camera Ramena",
+        "Spinny Hammy", "Los Sweethearts", "Motorino Bumbino", "Tacorita Bicicleta", "Baskito",
+        "Chicleteira Surfeiteira", "Bananito", "Chicleteira Noelteira", "Los Combinasionas",
+        "Nuclearo Dinossauro", "Gattino Hydrantino", "Chimnino", "Noo my Gold", "Noo my Heart",
+        "Swag Soda", "Mariachi Corazoni", "Pogo Pogo Penguin", "Tacorillo Crocodillo",
+        "La Grande Combinasion", "Los 25", "Los Burritos", "67", "Donkeyturbo Express",
+        "John Doe", "Burrito Bat", "Los Chicleteiras", "Noo my Eggs", "Syrup Samurai",
+        "Los Mi Gatitos", "Ombrello Topolino", "Strawberrita", "Flipa Sandala",
+        "Noo my Present", "Rang Ring Bus", "Los Nooo My Hotspotsitos", "Serafinna Medusella",
+        "Arcadopus", "Gub", "Noo my Candy", "Futbolini Skatini", "Los Quesadillas", "Aquarino",
+        "Los Bunitos", "Burrito Bandito", "Chicleteirina Bicicleteirina", "Chill Puppy",
+        "Flancito", "Luck Luck Luck Sahur", "Brunito Marsito", "Chicleteira Bicicleteira",
+        "Cupid Hotspot", "Eid Eid Eid Sahur", "Quesadillo Vampiro", "Ho Ho Ho Sahur",
+        "Mi Gatito", "Cupid Cupid Sahur", "Los Cornis", "Rosatops Triceratino",
+        "Bunito Bunito Spinito", "Naughty Naughty", "Pot Pumpkin", "Quesadilla Crocodila",
+        "Buho de Volto", "Horegini Boom", "Ref Ref Ref Sahur", "Santa Hotspot", "25",
+        "Pirulitoita Bicicleteira", "Pot Hotspot", "Glaciator", "Los Sigmas",
+        "Bunny Bunny Bunny Sahur", "To to to Sahur", "Toro Espanol", "La Sahur Combinasion",
+        "List List List Sahur", "Telemorte", "Noo my examine", "Berryno", "Bunnyman",
+        "Los Jobcitos", "Nooo My Hotspot", "Cuadramat and Pakrahmatmamat", "Gelato Lumacho",
+        "Please my Present", "Easter Easter Easter Sahur", "Hippo Golazo", "Los Cucarachas",
+        "1x1x1x1", "La Vacca Lepre Lepreino", "Bombardiro Vaccariro", "Graipuss Medussi",
+        "Love Love Love Sahur", "Perrito Burrito", "Giftini Spyderini", "GOAT",
+        "Honey Honey Narwhal", "Paradiso Axolottino", "Trickolino", "Triplito Tralaleritos",
+        "Buntteo", "La Vacca Jacko Linterino", "Fishboard", "Santteo",
+        "Las Vaquitas Saturnitas", "Los Karkeritos", "Karker Sahur", "Frankentteo",
+        "Job Job Job Sahur", "Los Trios", "Las Tralaleritas", "Pumpkini Spyderini",
+        "Rocco Disco", "Extinct Matteo", "La Karkerkar Combinasion", "La Vacca Prese Presente",
+        "Reindeer Tralala", "Yess my examine", "Guerriro Digitale", "Boatito Auratito",
+        "Los Tortus", "Los Tralaleritos", "Vulturino Skeletono", "Zombie Tralala",
+        "La Cucaracha", "Extinct Tralalero", "Agarrini La Palini", "Los Spyderinis",
+        "Blackhole Goat", "Chachechi", "Dul Dul Dul", "Torrtuginni Dragonfrutini",
+        "Trenostruzzo Turbo 4000", "Bisonte Giuppitere", "Karkerkar Kurkur",
+        "La Vacca Saturno Saturnita", "Los Matteos", "Sammyni Spyderini", "Jackorilla",
+        "Aura Farm Boat", "Chillin Clover", "Chimpanzini Spiderini",
+        "Coffin Tung Tung Tung Sahur", "Cornetto Morsetto", "Divine Rosey and Teddy",
+        "Gold Elf", "Granny", "Hokka Horloge", "Hopilikalika Hopilikalako Egg", "Ice Dragon",
+        "Quackini Snackini Egg", "Rainbow and Gold", "Sammyni Partyni", "Secret Lucky Block",
+        "Tung Tung Tung Sahur", "Wheelchair Granny",
+    } },
+    { tier = "og", names = {
+        "Spyder Elephant", "Strawberry Elephant", "Headless Horseman", "Meowl", "John Pork",
+        "Skibidi Toilet", "Smurf Cat",
+    } },
+}
+
+-- Comparaison des noms : minuscules, sans accents ni ponctuation ni emoji.
+-- Le jeu ecrit tantot "Los Tralaleritos", tantot "LosTralaleritos", et
+-- certaines pieces trainent un emoji dans leur nom.
+local function normalizeName(name)
+    local s = Util.lower(Util.trim(tostring(name or "")))
+    return (string.gsub(s, "[^%w]", ""))
+end
+
+-- Rang global d'une piece : palier x 1000 + sa place dans le palier. Un seul
+-- nombre suffit alors a comparer n'importe quelles deux pieces.
+local CATALOG = {}
+do
+    for tierIndex, entry in ipairs(BRAINROT_TIERS) do
+        local n = #entry.names
+        for i, name in ipairs(entry.names) do
+            CATALOG[normalizeName(name)] =
+                { tier = entry.tier, rank = tierIndex * 1000 + (n - i + 1) }
+        end
+    end
+end
+
+local function catalogOf(name)
+    if not name then return nil end
+    return CATALOG[normalizeName(name)]
+end
+
+-- Piece absente du catalogue : on la situe par son revenu, sur les memes
+-- paliers, pour qu'un brainrot sorti apres cette liste ne tombe pas au fond.
+local function incomeTier(income)
+    if income >= 1000000 then return 7 end
+    if income >= 100000  then return 6 end
+    if income >= 10000   then return 5 end
+    if income >= 1000    then return 4 end
+    if income >= 100     then return 3 end
+    if income >= 10      then return 2 end
+    return 1
+end
+
+-- Paliers dans l'ordre du jeu, du moins bon au plus rare. Les quatre
+-- derniers ne sont pas des paliers officiels mais le jeu les ecrit parfois :
+-- on les garde pour ne pas perdre une piece qui les porte.
 local RARITIES = {
-    "common", "uncommon", "rare", "epic", "legendary", "mythic", "godly",
-    "brainrot god", "secret", "limited", "exclusive", "og",
+    "common", "rare", "epic", "legendary", "mythic", "brainrot god",
+    "secret", "og", "uncommon", "godly", "limited", "exclusive",
 }
 
 -- rang de rarete : plus le nombre est grand, plus c'est rare. Sert au tri
@@ -650,7 +867,20 @@ local function attributesOf(inst)
 end
 
 local function readEntity(model)
-    local info = { model = model, name = nil, income = 0, rarity = nil, mutation = nil }
+    local info = { model = model, name = nil, income = 0, rarity = nil,
+                   mutation = nil, traits = nil }
+
+    -- un trait peut s'ajouter a un autre : on les accumule au lieu de garder
+    -- seulement le premier vu
+    local seenTraits = {}
+    local function addTrait(value)
+        local t = Util.trim(tostring(value or ""))
+        if t == "" then return end
+        local key = Util.lower(t)
+        if seenTraits[key] then return end
+        seenTraits[key] = true
+        info.traits = info.traits and (info.traits .. " / " .. t) or t
+    end
 
     for k, v in pairs(attributesOf(model)) do
         local lk = Util.lower(k)
@@ -660,8 +890,16 @@ local function readEntity(model)
                 info.name = info.name or v
             elseif lk == "mutation" or lk == "variant" or lk == "skin" then
                 info.mutation = info.mutation or v
+            elseif lk == "trait" or lk == "traits" or lk == "special"
+            or lk == "effect" or lk == "modifier" or lk == "buff" then
+                addTrait(v)
             elseif lk == "rarity" or lk == "tier" then
                 info.rarity = info.rarity or v
+            end
+        elseif type(v) == "boolean" and v == true then
+            -- certains jeux posent le trait comme un booleen : Gold = true
+            for _, m in ipairs(MUTATIONS) do
+                if lk == m then addTrait(k) end
             end
         elseif type(v) == "number" and v > 0 then
             if lk == "income" or lk == "generation" or lk == "persecond"
@@ -682,7 +920,12 @@ local function readEntity(model)
                 if lt == r then info.rarity = info.rarity or t tagged = true end
             end
             for _, m in ipairs(MUTATIONS) do
-                if lt == m then info.mutation = info.mutation or t tagged = true end
+                if lt == m then
+                    tagged = true
+                    -- la premiere mutation lue reste LA mutation, les
+                    -- suivantes deviennent des traits
+                    if not info.mutation then info.mutation = t else addTrait(t) end
+                end
             end
             if not tagged and not info.name and #t >= 3 and not tonumber(t) then
                 info.name = t
@@ -770,8 +1013,14 @@ function Inspector.group(chosen)
             local key = Util.lower((info.name or "?") .. "|" .. (info.mutation or ""))
             local b = buckets[key]
             if not b then
+                -- Le catalogue comble ce que la base ne dit pas : rarete
+                -- absente, et surtout un rang fiable pour le tri.
+                local cat = catalogOf(info.name or model.Name)
                 b = { name = info.name or model.Name, mutation = info.mutation,
-                      rarity = info.rarity, income = info.income, count = 0,
+                      traits = info.traits,
+                      rarity = info.rarity or (cat and cat.tier),
+                      score = cat and cat.rank or (incomeTier(info.income) * 1000),
+                      income = info.income, count = 0,
                       total = 0, model = model }
                 buckets[key] = b
                 table.insert(order, b)
@@ -783,21 +1032,22 @@ function Inspector.group(chosen)
         end
     end
 
-    -- Ordre : les epingles de CONFIG.TopBrainrots, puis le revenu A L'UNITE,
-    -- puis la rarete, puis le revenu cumule, puis la quantite.
+    -- Ordre : les epingles de CONFIG.TopBrainrots, puis le score du
+    -- catalogue, puis le revenu a l'unite, puis la quantite.
     --
-    -- Le revenu passe AVANT la rarete exprès. Beaucoup de bases ne portent
-    -- aucun tag de rarete lisible : rarityRank y renvoie 0, et trier sur la
-    -- rarete d'abord enterrait les meilleures pieces sous les communes.
-    -- Le revenu, lui, est toujours affiche par le jeu.
-    -- A l'unite et pas cumule : une pile de dix pieces a $10/s ne doit pas
-    -- passer devant un seul Dragon Cannelloni.
+    -- Le score est un SEUL nombre pour toutes les pieces, catalogues ou non :
+    -- une piece connue prend son rang de catalogue, une piece inconnue prend
+    -- le palier deduit de son revenu. Sans ca il aurait fallu comparer
+    -- tantot par rang tantot par revenu selon les deux pieces en presence,
+    -- ce qui donne un ordre incoherent et fait planter table.sort.
+    --
+    -- Revenu a l'unite et non cumule : une pile de dix pieces a $10/s ne
+    -- doit pas passer devant un seul Dragon Cannelloni.
     table.sort(order, function(a, b)
         local ta, tb = topRank(a.name), topRank(b.name)
         if ta ~= tb then return ta > tb end
+        if a.score ~= b.score then return a.score > b.score end
         if a.income ~= b.income then return a.income > b.income end
-        local ra, rb = rarityRank(a.rarity), rarityRank(b.rarity)
-        if ra ~= rb then return ra > rb end
         if a.total ~= b.total then return a.total > b.total end
         return a.count > b.count
     end)
@@ -1986,42 +2236,75 @@ local function flow(host, speed, transparency)
     return layer
 end
 
--- Gouttes de couleur qui derivent en fond.
+-- Gouttes qui tombent, facon sang qui coule.
 --
--- Elles vivent en ZIndex 0, donc DERRIERE les cartes : on ne les voit que
--- dans les interstices et les marges. C'est voulu, un fond qui bouge sous
--- le texte rend la lecture penible.
+-- Une goutte = une tete arrondie et une trainee fine au-dessus. La chute
+-- est en t^2 : la goutte accelere au lieu de descendre a vitesse constante,
+-- et c'est ca qui la fait lire comme une chute plutot qu'un defilement.
+-- La trainee s'allonge avec la vitesse, comme une vraie goutte qui file.
 --
--- Chaque goutte suit deux sinusoides de periodes differentes : le trajet ne
--- se referme jamais sur lui-meme et le mouvement ne parait pas boucler.
-local function dropField(parent, count)
+-- Le calque est en ZIndex 0, donc DERRIERE le contenu : on ne le voit que
+-- la ou il n'y a rien. Un fond qui bouge sous le texte rend la lecture
+-- penible.
+local function dropField(parent, count, density)
     local layer = mk("Frame", {
         Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
         ZIndex = 0, ClipsDescendants = true, Parent = parent,
     })
+    count = count or 7
 
-    for i = 1, (count or 5) do
-        local size = math.random(110, 210)
-        -- teintes alternees autour de l'accent, de la plus sombre a la plus claire
-        local mix = -0.55 + (i - 1) * (1.1 / math.max(1, (count or 5) - 1))
+    for i = 1, count do
+        local w = math.random(4, 8)
+        local headH = math.floor(w * 1.7)
+        local tailH = math.random(16, 34)
 
-        local drop = Skin.drop(corner(mk("Frame", {
-            Size = UDim2.new(0, size, 0, size),
-            BackgroundTransparency = 0.9, BorderSizePixel = 0,
-            ZIndex = 0, Parent = layer,
-        }), size / 2), mix)
-        pcall(function() drop:SetAttribute("TPH_Drop", true) end)
+        -- teintes alternees autour de l'accent : les gouttes ne sont pas
+        -- toutes du meme rouge, comme du vrai sang plus ou moins frais
+        local mix = -0.5 + (i - 1) * (0.9 / math.max(1, count - 1))
 
-        local sx, sy = 0.06 + math.random() * 0.05, 0.045 + math.random() * 0.05
-        local px, py = math.random() * 6.28, math.random() * 6.28
-        local sb, pb = 0.2 + math.random() * 0.15, math.random() * 6.28
+        local body = mk("Frame", {
+            Size = UDim2.new(0, w, 0, tailH + headH),
+            BackgroundTransparency = 1, ZIndex = 0, Parent = layer,
+        })
+
+        local tail = Skin.drop(mk("Frame", {
+            Size = UDim2.new(0, math.max(1, w - 3), 0, tailH),
+            Position = UDim2.new(0.5, -math.max(1, w - 3) / 2, 0, 0),
+            BackgroundTransparency = 0.86, BorderSizePixel = 0,
+            ZIndex = 0, Parent = body,
+        }), mix)
+        corner(tail, w)
+        pcall(function() tail:SetAttribute("TPH_Drop", true) end)
+
+        -- la tete est plus haute que large, arrondie a fond : la forme
+        -- d'une goutte, pas une bille
+        local head = Skin.drop(corner(mk("Frame", {
+            Size = UDim2.new(0, w, 0, headH),
+            Position = UDim2.new(0, 0, 0, tailH - 2),
+            BackgroundTransparency = density or 0.58, BorderSizePixel = 0,
+            ZIndex = 0, Parent = body,
+        }), w), mix)
+        pcall(function() head:SetAttribute("TPH_Drop", true) end)
+
+        local period = 3.4 + math.random() * 4.2
+        local phase  = math.random() * period
+        local x      = math.random()
 
         Pulse.add(function(t)
-            if not drop.Parent then return false end
-            drop.Position = UDim2.new(
-                0.5 + 0.46 * math.sin(t * sx + px), -size / 2,
-                0.5 + 0.46 * math.sin(t * sy + py), -size / 2)
-            drop.BackgroundTransparency = 0.87 + 0.09 * (0.5 + 0.5 * math.sin(t * sb + pb))
+            if not body.Parent then return false end
+            local k = ((t + phase) % period) / period
+
+            -- nouveau couloir a chaque passage, sinon la goutte retombe
+            -- toujours au meme endroit et le truc se voit
+            if k < 0.02 then x = math.random() end
+
+            local fall = k * k                    -- chute acceleree
+            body.Position = UDim2.new(x, -w / 2, -0.15 + 1.3 * fall, 0)
+
+            -- la trainee s'etire avec la vitesse, nulle au depart
+            tail.Size = UDim2.new(0, math.max(1, w - 3), 0, tailH * math.min(1, k * 2.2))
+            tail.Position = UDim2.new(0.5, -math.max(1, w - 3) / 2, 0,
+                tailH * (1 - math.min(1, k * 2.2)))
             return true
         end)
     end
@@ -2401,7 +2684,7 @@ local bodyFrame = mk("Frame", {
 
 -- les gouttes derivent derriere le contenu, dans le corps seulement : elles
 -- ne debordent ni sur la barre de titre ni sur les onglets
-dropField(bodyFrame, 5)
+dropField(bodyFrame, 9)
 
 -- en portrait le contenu occupe toute la largeur : plus de colonne laterale
 local contentArea = mk("Frame", {
@@ -2841,15 +3124,20 @@ local function slider(parent, text, key, minVal, maxVal, suffix, onChange)
     return holder, setValue
 end
 
-local function panel(parent, height)
+-- `blood` fait tomber des gouttes DANS le panneau, derriere son contenu.
+-- C'est la que l'effet se voit le mieux : le fond du panneau est plein,
+-- alors qu'entre les cartes il n'y a que de fines bandes.
+local function panel(parent, height, blood)
     local holder = corner(mk("Frame", {
         Size = UDim2.new(1, 0, 0, height or 150), BackgroundColor3 = THEME.surface,
-        BorderSizePixel = 0, Parent = parent,
+        BorderSizePixel = 0, ClipsDescendants = true, Parent = parent,
     }), 8)
+    if blood then dropField(holder, 6, 0.66) end
     local scroll = mk("ScrollingFrame", {
         Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(), Parent = holder,
+        ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(),
+        ZIndex = 1, Parent = holder,
     })
     local layout = listLayout(scroll, 5)
     Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -3082,6 +3370,30 @@ local RARITY_COLORS = {
     exclusive = Color3.fromRGB(255, 140, 0), og = Color3.fromRGB(255, 215, 0),
 }
 
+-- Palier -> reglage qui l'affiche ou le masque. Des cles plates plutot
+-- qu'une table imbriquee : switch() sait deja piloter CONFIG[cle].
+local RARITY_FILTERS = {
+    { tier = "common",       key = "ShowCommon",    label = "Common" },
+    { tier = "rare",         key = "ShowRare",      label = "Rare" },
+    { tier = "epic",         key = "ShowEpic",      label = "Epic" },
+    { tier = "legendary",    key = "ShowLegendary", label = "Legendary" },
+    { tier = "mythic",       key = "ShowMythic",    label = "Mythic" },
+    { tier = "brainrot god", key = "ShowGod",       label = "Brainrot God" },
+    { tier = "secret",       key = "ShowSecret",    label = "Secret" },
+    { tier = "og",           key = "ShowOG",        label = "OG" },
+}
+
+local function rarityAllowed(entry)
+    local r = entry.rarity and Util.lower(Util.trim(entry.rarity)) or nil
+    if r then
+        for _, f in ipairs(RARITY_FILTERS) do
+            if r == f.tier then return CONFIG[f.key] ~= false end
+        end
+    end
+    -- rarete absente ou hors des huit paliers : son propre interrupteur
+    return CONFIG.ShowUnknown ~= false
+end
+
 local function rarityColor(name)
     if not name then return THEME.line end
     return RARITY_COLORS[Util.lower(Util.trim(name))] or THEME.line
@@ -3094,7 +3406,7 @@ local function brainrotTile(scroll, entry, index)
     local col  = rarityColor(entry.rarity)
 
     local tile = corner(mk("Frame", {
-        Size = UDim2.new(0, size + 16, 0, size + 64), BackgroundColor3 = THEME.card,
+        Size = UDim2.new(0, size + 16, 0, size + 76), BackgroundColor3 = THEME.card,
         BackgroundTransparency = 1, BorderSizePixel = 0, Parent = scroll,
     }), 10)
     local tileStroke = stroke(tile, col, 1.5, 1)
@@ -3139,19 +3451,37 @@ local function brainrotTile(scroll, entry, index)
     end
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -12, 0, 15), Position = UDim2.new(0, 6, 0, size + 12),
+        Size = UDim2.new(1, -12, 0, 15), Position = UDim2.new(0, 6, 0, size + 10),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = entry.name,
         TextSize = 12, TextColor3 = THEME.text,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
     })
+
+    -- la rarete sur sa ligne, a la couleur du palier
     mk("TextLabel", {
-        Size = UDim2.new(1, -12, 0, 13), Position = UDim2.new(0, 6, 0, size + 28),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-        Text = entry.mutation or entry.rarity or "-", TextSize = 10, TextColor3 = col,
+        Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 6, 0, size + 26),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = entry.rarity and string.upper(entry.rarity) or "-",
+        TextSize = 9, TextColor3 = col,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
     })
+
+    -- mutation et traits sur la suivante : c'est ce qui fait la valeur reelle
+    -- de la piece, deux Tralalero ne valent pas pareil selon leur mutation
+    local extras = {}
+    if entry.mutation then extras[#extras + 1] = entry.mutation end
+    if entry.traits then extras[#extras + 1] = entry.traits end
     mk("TextLabel", {
-        Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, size + 43),
+        Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 6, 0, size + 39),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+        Text = #extras > 0 and table.concat(extras, " / ") or "sans mutation",
+        TextSize = 10,
+        TextColor3 = #extras > 0 and THEME.good or THEME.dim,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
+    })
+
+    mk("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, size + 54),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = entry.total > 0 and ("$" .. Util.short(entry.total) .. "/s") or "-",
         TextSize = 13, TextColor3 = THEME.accent, Parent = tile,
@@ -3171,7 +3501,7 @@ scanBase = function(player, model, ownerName)
     -- colonnes tombe tout seul de la largeur disponible, et la grille reste
     -- centree quand la derniere rangee est incomplete.
     local size = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
-    brainrotGrid.CellSize = UDim2.new(0, size + 16, 0, size + 64)
+    brainrotGrid.CellSize = UDim2.new(0, size + 16, 0, size + 76)
 
     local list, total, count, mode = {}, 0, 0, "base"
     if plot then list, total, count = Inspector.brainrots(plot) end
@@ -3181,6 +3511,25 @@ scanBase = function(player, model, ownerName)
     if #list == 0 and player then
         local l2, t2, c2 = Inspector.nearPlayer(player, CONFIG.PlazaRadius)
         if #l2 > 0 then list, total, count, mode = l2, t2, c2, "plaza" end
+    end
+
+    -- filtre par palier : on garde le total reel avant de masquer, sinon le
+    -- resume mentirait sur ce que le joueur possede vraiment
+    local shown, hidden = {}, 0
+    for _, entry in ipairs(list) do
+        if rarityAllowed(entry) then shown[#shown + 1] = entry
+        else hidden = hidden + 1 end
+    end
+
+    if #list > 0 and #shown == 0 then
+        baseSummary.Text = string.format(
+            "%d types masques par tes filtres de rarete", hidden)
+        textLine(brainrotPanel, "tout est masque par tes filtres de rarete",
+            THEME.warn, Enum.Font.Gotham)
+        textLine(brainrotPanel, "reactive un palier dans Reglages > Filtre de rarete",
+            THEME.sub, Enum.Font.Gotham)
+        setStatus("tout masque par les filtres", THEME.warn)
+        return
     end
 
     if #list == 0 then
@@ -3196,11 +3545,12 @@ scanBase = function(player, model, ownerName)
     end
 
     baseSummary.Text = string.format(
-        "%s de %s   -   %d brainrots   -   %d types   -   revenu total $%s/s",
+        "%s de %s   -   %d brainrots   -   %d types   -   $%s/s%s",
         mode == "plaza" and "Stand" or "Base",
-        ownerName, count, #list, Util.short(total))
+        ownerName, count, #list, Util.short(total),
+        hidden > 0 and ("   -   " .. hidden .. " masques") or "")
 
-    for i, entry in ipairs(list) do
+    for i, entry in ipairs(shown) do
         if i > 60 then break end
         brainrotTile(brainrotPanel, entry, i)
     end
@@ -3286,7 +3636,7 @@ end
 refreshLangNote()
 
 local cardConv = card(pageChat)
-local chatPanel = panel(cardConv, 286)
+local chatPanel = panel(cardConv, 286, true)
 
 local sendReply
 
@@ -3638,6 +3988,15 @@ do
     -- couleur enregistree, sinon l'anneau reste sur la mauvaise pastille
     UI.refreshSwatches = refreshDots
 end
+
+----------------------------------------------------------------------------------
+-- Filtre de rarete : ce qu'on veut voir en ouvrant la base d'un joueur
+----------------------------------------------------------------------------------
+local cardFilter = card(pageSettings, "Filtre de rarete")
+for _, f in ipairs(RARITY_FILTERS) do
+    switch(cardFilter, f.label, f.key, function() redrawBase() end)
+end
+switch(cardFilter, "Rarete inconnue", "ShowUnknown", function() redrawBase() end)
 
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
