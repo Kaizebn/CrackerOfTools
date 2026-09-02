@@ -1792,6 +1792,7 @@ local modePill = corner(mk("Frame", {
     BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = titleBar,
 }), 10)
 stroke(modePill, THEME.good, 1, 0.3)
+depth3D(modePill, THEME.good, THEME.accent2)
 mk("TextLabel", {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
     Font = Enum.Font.GothamBold, Text = "lecture seule", TextSize = 10,
@@ -1826,6 +1827,8 @@ local sidebar = mk("Frame", {
     Size = UDim2.new(0, 132, 1, 0), BackgroundColor3 = THEME.surface,
     BorderSizePixel = 0, Parent = bodyFrame,
 })
+stroke(sidebar, THEME.line, 1, 0.3)
+depth3D(sidebar, THEME.line, THEME.accent2)
 listLayout(sidebar, 4)
 pad(sidebar, 10)
 
@@ -1838,6 +1841,8 @@ local statusBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 28), Position = UDim2.new(0, 0, 1, -28),
     BackgroundColor3 = THEME.surface, BorderSizePixel = 0, Parent = window,
 })
+stroke(statusBar, THEME.line, 1, 0.25)
+depth3D(statusBar, THEME.line, THEME.accent2)
 local statusDot = corner(mk("Frame", {
     Size = UDim2.new(0, 7, 0, 7), Position = UDim2.new(0, 16, 0.5, -3.5),
     BackgroundColor3 = THEME.sub, BorderSizePixel = 0, Parent = statusBar,
@@ -1911,7 +1916,7 @@ local function addTab(name, icon)
     local tabIcon = mk("TextLabel", {
         Size = UDim2.new(0, 20, 1, 0), Position = UDim2.new(0, 11, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = icon or "", TextSize = 14, TextColor3 = THEME.sub, Parent = tab,
+        Text = icon or "", TextSize = 16, TextColor3 = THEME.sub, Parent = tab,
     })
     local tabLabel = mk("TextLabel", {
         Size = UDim2.new(1, -40, 1, 0), Position = UDim2.new(0, 36, 0, 0),
