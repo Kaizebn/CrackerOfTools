@@ -1553,20 +1553,11 @@ end
 -- les reponses, et DuelsMachineService invite en duel, pas en trade.
 local TRADE_REJECT = { "accept", "decline", "result", "cancel", "duel" }
 
-function Trade.remote()
-    if Trade.cached and Trade.cached.Parent then return Trade.cached end
-
-    local forced = CONFIG.TradeRemote
-    if forced and forced ~= "" then
-        local node = Util.dottedPath(forced)
-        if node and isRemote(node) then
-            Trade.cached = node
-            log("remote de trade force -> %s", node:GetFullName())
-            return node
-        end
-    end
-
-    local best, bestScore = nil, 0
+-- Tous les remotes qui pourraient lancer une invitation, du plus probable
+-- au moins probable. On les liste au lieu d'en elire un d'office : lequel
+-- part vraiment ne se devine pas depuis le nom, il faut essayer.
+function Trade.candidates()
+    local found = {}
     for _, d in ipairs(allRemotes()) do
         local full = Util.lower(d:GetFullName())
         if string.find(full, "invite", 1, true) then
@@ -1574,23 +1565,55 @@ function Trade.remote()
             for _, bad in ipairs(TRADE_REJECT) do
                 if string.find(full, bad, 1, true) then rejected = true break end
             end
+            -- CreateInvite porte "create" et non "accept" : il reste candidat
             if not rejected then
                 local score = 1
                 if string.find(full, "tradeservice", 1, true) then score = score + 10 end
                 if string.find(full, "trade", 1, true) then score = score + 5 end
-                -- ".../Invite" tout court est l'appel, pas un evenement annexe
+                if string.find(full, "createinvite", 1, true) then score = score + 4 end
                 if string.find(full, "/invite", 1, true) then score = score + 4 end
-                if d:IsA("RemoteFunction") then score = score + 2 end
-                if score > bestScore then best, bestScore = d, score end
+                found[#found + 1] = { remote = d, score = score }
+            end
+        end
+    end
+    table.sort(found, function(a, b) return a.score > b.score end)
+
+    local list = {}
+    for _, e in ipairs(found) do list[#list + 1] = e.remote end
+    return list
+end
+
+function Trade.remote()
+    if Trade.cached and Trade.cached.Parent then return Trade.cached end
+
+    local list = Trade.candidates()
+    local forced = CONFIG.TradeRemote
+
+    -- Comparaison sur le nom complet plutot que par chemin pointe : ces
+    -- remotes s'appellent "RF/TradeService/Invite", slashs compris, ce qu'un
+    -- decoupage sur les points ne sait pas retrouver.
+    if forced and forced ~= "" then
+        for _, d in ipairs(list) do
+            if d:GetFullName() == forced or d.Name == forced then
+                Trade.cached = d
+                return d
             end
         end
     end
 
+    local best = list[1]
     if best then
         Trade.cached = best
         log("remote de trade -> %s (%s)", best:GetFullName(), best.ClassName)
     end
     return best
+end
+
+-- change le remote utilise sans relancer le script
+function Trade.choose(fullName)
+    CONFIG.TradeRemote = fullName or ""
+    Trade.cached = nil
+    return Trade.remote()
 end
 
 function Trade.viaRemote(player)
@@ -4670,8 +4693,34 @@ switch(cardPlayers, "Autoriser le TP vers une base", "AllowTeleport", function()
 end)
 switch(cardPlayers, "TP instantane (bien plus voyant)", "InstantTeleport")
 
--- Si l'invitation ne part pas, c'est presque toujours l'argument attendu
--- par le service qui differe. Les trois formes se testent d'ici.
+-- Quand l'invitation ne part pas, ce sont ces deux reglages qu'il faut
+-- promener : quel remote appeler, et avec quoi. Six combinaisons au plus,
+-- et le statut dit ce que le serveur a repondu a chaque essai.
+do
+    local names, labels = {}, {}
+    for _, d in ipairs(Trade.candidates()) do
+        local full = d:GetFullName()
+        names[#names + 1] = full
+        -- RF / RE : les memes sigles que dans l'explorateur du jeu
+        labels[full] = d.Name .. "  ["
+            .. (d:IsA("RemoteFunction") and "RF" or "RE") .. "]"
+    end
+    if #names == 0 then names = { "" } labels[""] = "aucun trouve" end
+
+    -- le premier de la liste est celui que le script prendrait tout seul
+    if not CONFIG.TradeRemote or CONFIG.TradeRemote == "" then
+        CONFIG.TradeRemote = names[1]
+    end
+
+    listPicker(cardPlayers, "Remote du trade", names, "TradeRemote",
+        function(v) return labels[v] or tostring(v) end,
+        function(v)
+            local r = Trade.choose(v)
+            setStatus(r and ("remote : " .. r.Name) or "remote introuvable",
+                r and THEME.good or THEME.bad)
+        end)
+end
+
 listPicker(cardPlayers, "Argument du trade", Trade.args, "TradeArgument", tostring)
 slider(cardPlayers, "Vitesse du TP", "TeleportSpeed", 40, 400, " st/s")
 
