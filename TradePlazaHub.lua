@@ -97,6 +97,12 @@ local CONFIG = {
     ChatFont     = POLICE_CHAT,   -- police des messages (onglet Reglages)
     ModelSize    = 140,         -- taille de l'apercu 3D des brainrots (px)
 
+    -- Rayon de lecture au Trade Plaza (en studs). Cette carte n'a pas de
+    -- conteneur "Plots" : les brainrots sont poses autour du joueur, donc on
+    -- lit ce qui se trouve dans ce rayon autour de lui. Monte-le si son
+    -- stand est plus loin, baisse-le s'il attrape les pieces du voisin.
+    PlazaRadius  = 60,
+
     -- Brainrots epingles en tete de la base, du meilleur au moins bon.
     -- Le tri normal (rarete, puis revenu) ne suffit pas : deux pieces
     -- "Secret" ne valent pas la meme chose, et c'est le nom qui tranche.
@@ -737,25 +743,25 @@ end
 
 -- retourne la liste groupee (avec le modele pour l'apercu 3D), le revenu total
 -- et le nombre d'unites
-function Inspector.brainrots(plot)
-    if not plot then return {}, 0, 0 end
-
-    local candidates, chosen = {}, {}
-    local ok, list = pcall(function() return plot:GetDescendants() end)
-    if not ok then return {}, 0, 0 end
-
-    for _, d in ipairs(list) do
-        if d:IsA("Model") and isEntityModel(d) then candidates[d] = true end
-    end
+-- Ne garde que les modeles de plus haut niveau : un brainrot contient
+-- souvent des sous-modeles qui passent eux aussi le test, et on ne veut pas
+-- compter la piece trois fois.
+local function outermost(candidates, stopAt)
+    local chosen = {}
     for model in pairs(candidates) do
         local nested, parent = false, model.Parent
-        while parent and parent ~= plot do
+        while parent and parent ~= stopAt do
             if candidates[parent] then nested = true break end
             parent = parent.Parent
         end
         if not nested then table.insert(chosen, model) end
     end
+    return chosen
+end
 
+-- Regroupe une liste de modeles en vignettes : comptage, revenus, tri.
+-- Partage par le scan d'une base et par celui du Trade Plaza.
+function Inspector.group(chosen)
     local buckets, order, total, kept = {}, {}, 0, 0
     for _, model in ipairs(chosen) do
         local info = readEntity(model)
@@ -796,6 +802,59 @@ function Inspector.brainrots(plot)
         return a.count > b.count
     end)
     return order, total, kept
+end
+
+function Inspector.brainrots(plot)
+    if not plot then return {}, 0, 0 end
+    local ok, list = pcall(function() return plot:GetDescendants() end)
+    if not ok then return {}, 0, 0 end
+
+    local candidates = {}
+    for _, d in ipairs(list) do
+        if d:IsA("Model") and isEntityModel(d) then candidates[d] = true end
+    end
+    return Inspector.group(outermost(candidates, plot))
+end
+
+-- Trade Plaza : il n'y a pas de conteneur "Plots" dans cette carte, donc
+-- Plots:ForPlayer ne trouve rien et la base ressort vide. Les brainrots y
+-- sont poses autour du joueur, sur son stand. On prend donc ce qui
+-- ressemble a un brainrot dans un rayon autour de lui.
+function Inspector.nearPlayer(player, radius)
+    local char = player and player.Character
+    local root = char and (char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChildWhichIsA("BasePart"))
+    if not root then return {}, 0, 0 end
+
+    radius = radius or 60
+    local origin = root.Position
+    local ok, list = pcall(function() return workspace:GetDescendants() end)
+    if not ok then return {}, 0, 0 end
+
+    -- Les avatars sont ecartes : un personnage est un Model qui passe le
+    -- test d'entite, et sans ca on compterait les joueurs eux-memes.
+    local chars = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then chars[p.Character] = true end
+    end
+
+    local candidates = {}
+    for _, d in ipairs(list) do
+        if d:IsA("Model") and not chars[d] and isEntityModel(d) then
+            local inChar, parent = false, d.Parent
+            while parent and parent ~= workspace do
+                if chars[parent] then inChar = true break end
+                parent = parent.Parent
+            end
+            if not inChar then
+                local cf = pivotOf(d)
+                if cf and (cf.Position - origin).Magnitude <= radius then
+                    candidates[d] = true
+                end
+            end
+        end
+    end
+    return Inspector.group(outermost(candidates, workspace))
 end
 
 function Inspector.dump(plot, maxLines)
@@ -1693,10 +1752,42 @@ local SKIN_PROPS = {
 }
 
 Skin.file = "TradePlazaHub_couleur.txt"
+Skin.drops = {}
 
-function Skin.gradient(grad)
-    Skin.gradients[#Skin.gradients + 1] = grad
+function Skin.gradient(grad, kind)
+    Skin.gradients[#Skin.gradients + 1] = { grad = grad, kind = kind or "glow" }
     return grad
+end
+
+-- Degrade "coulant" : plus de paliers que le glow, et des ecarts inegaux,
+-- pour que le defilement donne des paquets de couleur qui passent plutot
+-- qu'une bande reguliere.
+function Skin.flowSequence(a, b)
+    local pale = a:Lerp(Color3.fromRGB(255, 255, 255), 0.45)
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0, b),
+        ColorSequenceKeypoint.new(0.22, a),
+        ColorSequenceKeypoint.new(0.38, pale),
+        ColorSequenceKeypoint.new(0.55, a),
+        ColorSequenceKeypoint.new(0.78, b),
+        ColorSequenceKeypoint.new(1, a),
+    })
+end
+
+-- Teinte d'une goutte. mix > 0 tire vers le clair, mix < 0 vers le fonce :
+-- les gouttes restent de la meme famille que l'accent tout en etant
+-- distinctes les unes des autres.
+function Skin.dropColor(mix)
+    if mix >= 0 then
+        return THEME.accent:Lerp(Color3.fromRGB(255, 255, 255), mix)
+    end
+    return THEME.accent:Lerp(THEME.accent2, -mix)
+end
+
+function Skin.drop(frame, mix)
+    Skin.drops[#Skin.drops + 1] = { frame = frame, mix = mix }
+    frame.BackgroundColor3 = Skin.dropColor(mix)
+    return frame
 end
 
 -- La couleur choisie tient d'un lancement a l'autre quand l'executor sait
@@ -1732,9 +1823,10 @@ function Skin.apply(newAccent, root)
     if not ok then return end
 
     for _, d in ipairs(list) do
-        -- les pastilles du selecteur portent les couleurs du nuancier :
-        -- les repeindre reviendrait a effacer le choix propose
-        if not d:GetAttribute("TPH_Swatch") then
+        -- Deux exceptions au repeinturage : les pastilles du nuancier, qui
+        -- portent exprès les couleurs proposees, et les gouttes, qui ont
+        -- leur propre teinte et sont reprises juste apres.
+        if not (d:GetAttribute("TPH_Swatch") or d:GetAttribute("TPH_Drop")) then
             if d:IsA("UIStroke") then
                 if d.Color == oldA then d.Color = newAccent
                 elseif d.Color == oldB then d.Color = newB end
@@ -1750,14 +1842,25 @@ function Skin.apply(newAccent, root)
         end
     end
 
-    for _, grad in ipairs(Skin.gradients) do
-        if grad.Parent then
-            pcall(function() grad.Color = Skin.sequence(newAccent, newB) end)
+    for _, g in ipairs(Skin.gradients) do
+        if g.grad.Parent then
+            pcall(function()
+                g.grad.Color = (g.kind == "flow")
+                    and Skin.flowSequence(newAccent, newB)
+                    or Skin.sequence(newAccent, newB)
+            end)
         end
     end
 
     -- tout ce qui sera cree ensuite lit deja la nouvelle couleur
     THEME.accent, THEME.accent2 = newAccent, newB
+
+    -- les gouttes se recalculent depuis le nouvel accent
+    for _, d in ipairs(Skin.drops) do
+        if d.frame.Parent then
+            pcall(function() d.frame.BackgroundColor3 = Skin.dropColor(d.mix) end)
+        end
+    end
 end
 
 local function mk(class, props)
@@ -1849,6 +1952,80 @@ local function sweepBar(parent, height)
         return true
     end)
     return bar
+end
+
+-- Fait couler la couleur SUR une surface deja coloree (bouton principal,
+-- trait d'onglet actif) : le mouvement de couleur la ou il y a deja de la
+-- couleur, sans toucher au reste.
+--
+-- Le degrade ne va PAS sur l'hote : un UIGradient multiplie la couleur de
+-- fond, donc pose sur un fond deja accent il rendrait presque noir. On
+-- passe par un calque blanc translucide, que le degrade colore vraiment et
+-- qui n'entre pas en conflit avec les changements de teinte au survol.
+local function flow(host, speed, transparency)
+    local layer = mk("Frame", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BackgroundTransparency = transparency or 0.7,
+        BorderSizePixel = 0, ZIndex = 0, Parent = host,
+    })
+    -- le calque epouse l'arrondi de son hote, sinon il deborde aux coins
+    local hostCorner = host:FindFirstChildOfClass("UICorner")
+    if hostCorner then corner(layer, hostCorner.CornerRadius.Offset) end
+
+    local grad = Skin.gradient(mk("UIGradient", {
+        Color = Skin.flowSequence(THEME.accent, THEME.accent2),
+        Rotation = 12, Parent = layer,
+    }), "flow")
+
+    Pulse.add(function(t)
+        if not grad.Parent then return false end
+        grad.Offset = Vector2.new(((t * (speed or 0.22)) % 2) - 1, 0)
+        return true
+    end)
+    return layer
+end
+
+-- Gouttes de couleur qui derivent en fond.
+--
+-- Elles vivent en ZIndex 0, donc DERRIERE les cartes : on ne les voit que
+-- dans les interstices et les marges. C'est voulu, un fond qui bouge sous
+-- le texte rend la lecture penible.
+--
+-- Chaque goutte suit deux sinusoides de periodes differentes : le trajet ne
+-- se referme jamais sur lui-meme et le mouvement ne parait pas boucler.
+local function dropField(parent, count)
+    local layer = mk("Frame", {
+        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+        ZIndex = 0, ClipsDescendants = true, Parent = parent,
+    })
+
+    for i = 1, (count or 5) do
+        local size = math.random(110, 210)
+        -- teintes alternees autour de l'accent, de la plus sombre a la plus claire
+        local mix = -0.55 + (i - 1) * (1.1 / math.max(1, (count or 5) - 1))
+
+        local drop = Skin.drop(corner(mk("Frame", {
+            Size = UDim2.new(0, size, 0, size),
+            BackgroundTransparency = 0.9, BorderSizePixel = 0,
+            ZIndex = 0, Parent = layer,
+        }), size / 2), mix)
+        pcall(function() drop:SetAttribute("TPH_Drop", true) end)
+
+        local sx, sy = 0.06 + math.random() * 0.05, 0.045 + math.random() * 0.05
+        local px, py = math.random() * 6.28, math.random() * 6.28
+        local sb, pb = 0.2 + math.random() * 0.15, math.random() * 6.28
+
+        Pulse.add(function(t)
+            if not drop.Parent then return false end
+            drop.Position = UDim2.new(
+                0.5 + 0.46 * math.sin(t * sx + px), -size / 2,
+                0.5 + 0.46 * math.sin(t * sy + py), -size / 2)
+            drop.BackgroundTransparency = 0.87 + 0.09 * (0.5 + 0.5 * math.sin(t * sb + pb))
+            return true
+        end)
+    end
+    return layer
 end
 
 ----------------------------------------------------------------------------------
@@ -2137,7 +2314,9 @@ local BAR_H, TABS_H, STAT_H = 52, 64, 26
 local window = corner(mk("Frame", {
     Size = UDim2.new(0, WIN_W, 0, WIN_H),
     Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -WIN_H / 2),
-    BackgroundColor3 = THEME.card, BorderSizePixel = 0,
+    -- fond plus sombre que les cartes : c'est ce creux qui laisse voir les
+    -- gouttes entre les panneaux
+    BackgroundColor3 = THEME.bg, BorderSizePixel = 0,
     ClipsDescendants = true, Parent = screen,
 }), 16)
 glowStroke(window, 3.5, 0.1, 20)
@@ -2220,9 +2399,14 @@ local bodyFrame = mk("Frame", {
     BackgroundTransparency = 1, Parent = window,
 })
 
+-- les gouttes derivent derriere le contenu, dans le corps seulement : elles
+-- ne debordent ni sur la barre de titre ni sur les onglets
+dropField(bodyFrame, 5)
+
 -- en portrait le contenu occupe toute la largeur : plus de colonne laterale
 local contentArea = mk("Frame", {
-    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Parent = bodyFrame,
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+    ZIndex = 1, Parent = bodyFrame,
 })
 
 local tabBar = mk("Frame", {
@@ -2320,12 +2504,13 @@ local function addTab(name, iconFn)
         BorderSizePixel = 0, Parent = tabBar,
     })
 
-    -- trait d'activation, colle en haut de l'onglet
+    -- trait d'activation, colle en haut de l'onglet, la couleur y coule
     local mark = corner(mk("Frame", {
         Size = UDim2.new(0, 0, 0, 2), Position = UDim2.new(0.5, 0, 0, 0),
         AnchorPoint = Vector2.new(0.5, 0), BackgroundColor3 = THEME.accent,
         BorderSizePixel = 0, Parent = tab,
     }), 1)
+    flow(mark, 0.3)
 
     local tabIcon = iconFn(tab, 22, THEME.sub)
     tabIcon.holder.Position = UDim2.new(0.5, -11, 0, 13)
@@ -2496,11 +2681,20 @@ local function btn(parent, opts)
         halo = stroke(b, THEME.line, 1, 0.4)
     else
         halo = stroke(b, base, 1.4, 1)
+        -- Bouton principal seulement : sur un bouton rouge de suppression,
+        -- un reflet a la couleur d'accent brouillerait le message.
+        if style == "primary" then flow(b, 0.2, 0.74) end
     end
 
     Maid.conn(b.MouseEnter:Connect(function()
         tween(b, { BackgroundColor3 = hoverColor() }, 0.14)
-        tween(halo, { Color = THEME.accent, Transparency = 0.25, Thickness = 1.8 }, 0.16)
+        -- le halo reprend la couleur du bouton, pas l'accent : un bouton de
+        -- suppression qui s'entoure de bleu au survol dit le contraire de ce
+        -- qu'il fait
+        tween(halo, {
+            Color = style == "danger" and THEME.bad or THEME.accent,
+            Transparency = 0.25, Thickness = 1.8,
+        }, 0.16)
         tween(sheen, { BackgroundTransparency = 0.5 }, 0.16)
     end))
     Maid.conn(b.MouseLeave:Connect(function()
@@ -2969,12 +3163,8 @@ scanBase = function(player, model, ownerName)
     local plot = model
     ownerName = ownerName or (player and player.Name) or "?"
     if not plot and player then plot = Plots:ForPlayer(player) end
-    if not plot then
-        setStatus("base introuvable pour " .. ownerName, THEME.bad)
-        baseSummary.Text = "base introuvable pour " .. ownerName
-        return
-    end
-    State.Plot, State.PlotOwner = plot, ownerName
+
+    State.Plot, State.PlotOwner, State.PlotPlayer = plot, ownerName, player
     clearChildren(brainrotPanel)
 
     -- La cellule fait exactement la taille d'une vignette : le nombre de
@@ -2983,27 +3173,47 @@ scanBase = function(player, model, ownerName)
     local size = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
     brainrotGrid.CellSize = UDim2.new(0, size + 16, 0, size + 64)
 
-    local list, total, count = Inspector.brainrots(plot)
-    baseSummary.Text = string.format(
-        "Base de %s   -   %d brainrots   -   %d types   -   revenu total $%s/s",
-        ownerName, count, #list, Util.short(total))
+    local list, total, count, mode = {}, 0, 0, "base"
+    if plot then list, total, count = Inspector.brainrots(plot) end
+
+    -- Pas de plot, ou un plot vide : on est probablement au Trade Plaza, ou
+    -- les pieces sont posees sur le stand du joueur et pas sur une base.
+    if #list == 0 and player then
+        local l2, t2, c2 = Inspector.nearPlayer(player, CONFIG.PlazaRadius)
+        if #l2 > 0 then list, total, count, mode = l2, t2, c2, "plaza" end
+    end
 
     if #list == 0 then
-        textLine(brainrotPanel, "aucun brainrot reconnu sur cette base", THEME.bad, Enum.Font.Gotham)
-        textLine(brainrotPanel, "sa base est peut-etre vide, ou le jeu range ses objets ailleurs",
+        local why = plot and "aucun brainrot reconnu sur cette base"
+            or ("aucune base ni stand trouve pour " .. ownerName)
+        baseSummary.Text = why
+        textLine(brainrotPanel, why, THEME.bad, Enum.Font.Gotham)
+        textLine(brainrotPanel,
+            "approche-toi de lui : au Trade Plaza on lit ce qui est pose autour",
             THEME.sub, Enum.Font.Gotham)
-    else
-        for i, entry in ipairs(list) do
-            if i > 60 then break end
-            brainrotTile(brainrotPanel, entry, i)
-        end
+        setStatus(why, THEME.bad)
+        return
     end
-    setStatus("base de " .. ownerName .. " : " .. count .. " brainrots", THEME.good)
+
+    baseSummary.Text = string.format(
+        "%s de %s   -   %d brainrots   -   %d types   -   revenu total $%s/s",
+        mode == "plaza" and "Stand" or "Base",
+        ownerName, count, #list, Util.short(total))
+
+    for i, entry in ipairs(list) do
+        if i > 60 then break end
+        brainrotTile(brainrotPanel, entry, i)
+    end
+    setStatus((mode == "plaza" and "stand de " or "base de ")
+        .. ownerName .. " : " .. count .. " brainrots", THEME.good)
 end
 
--- re-affiche la base courante (apres un changement de taille de vignette)
+-- re-affiche la base courante (apres un changement de taille de vignette).
+-- On repasse le joueur : au Trade Plaza il n'y a pas de plot a redonner.
 local function redrawBase()
-    if State.Plot then scanBase(nil, State.Plot, State.PlotOwner) end
+    if State.Plot or State.PlotPlayer then
+        scanBase(State.PlotPlayer, State.Plot, State.PlotOwner)
+    end
 end
 
 ----------------------------------------------------------------------------------
