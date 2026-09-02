@@ -2,20 +2,27 @@
 ==================================================================================
     TRADE PLAZA HUB  v3   --  script client (executor / LocalScript)
 ==================================================================================
-    VERSION LECTURE SEULE
-    ---------------------
-    Ce hub ne touche a rien. Il n'envoie AUCUN appel au serveur, ne deplace
-    pas le personnage et n'installe aucun hook. Il lit ce qui est deja charge
-    chez toi et l'affiche. Rien la-dedans ne peut declencher un anti-cheat.
+    LECTURE SEULE, SAUF LE BOUTON TRADE
+    -----------------------------------
+    Le hub lit ce qui est deja charge chez toi et l'affiche. Il ne deplace
+    pas le personnage et n'installe aucun hook.
 
-    Ce qui a ete retire, et pourquoi :
+    UNE SEULE EXCEPTION : le bouton TRADE des lignes de joueur. Il essaie
+    d'abord de declencher le bouton de trade DU JEU (via getconnections),
+    auquel cas c'est le code du jeu qui construit ses propres arguments et
+    le risque est celui d'un vrai clic. Si ca echoue seulement, il appelle
+    un remote de trade avec le joueur en argument -- et la, c'est un pari.
+
+    Mets CONFIG.AllowTrade = false, ou coupe l'interrupteur dans Reglages,
+    et le hub redevient strictement en lecture seule.
+
+    Ce qui reste volontairement absent, et pourquoi :
       - deplacement (vol BodyVelocity, marche auto, CFrame, noclip)
         -> le serveur compare ta position d'une frame a l'autre avec ta
            WalkSpeed : peu importe COMMENT tu bouges, la trajectoire est
            impossible et c'est ca qui fait kick.
-      - invitation de trade, envoi de chat (FireServer / InvokeServer)
-        -> un remote appele avec des arguments que le serveur n'attend pas
-           fait kick, meme a un seul appel.
+      - envoi de chat par remote
+        -> on passe par la zone de saisie du jeu, qui envoie elle-meme.
       - hookmetamethod sur __namecall
         -> detectable cote client, quoi qu'on en fasse.
 
@@ -96,6 +103,17 @@ local CONFIG = {
     ShowModels   = true,
     ChatFont     = POLICE_CHAT,   -- police des messages (onglet Reglages)
     ModelSize    = 140,         -- taille de l'apercu 3D des brainrots (px)
+
+    -- Joueurs coches (base interessante) et joueurs vires de la liste.
+    -- Deux ensembles indexes par UserId, gardes d'une session a l'autre
+    -- quand l'executor sait ecrire un fichier.
+    Marked      = {},
+    Hidden      = {},
+    AskOnScan   = true,   -- demander "on le garde ?" apres chaque scan
+
+    -- Envoi de demande de trade. C'est la SEULE chose du script qui peut
+    -- parler au serveur : mets false pour rester en lecture seule totale.
+    AllowTrade  = true,
 
     -- Filtre de la base : decoche un palier dans Reglages et ses pieces
     -- disparaissent de l'affichage. Pratique pour ne voir que le haut du
@@ -1317,6 +1335,177 @@ end
 -- l'ouvrir et le corriger a la main. Si l'executor ne sait pas ecrire de
 -- fichier, les messages vivent le temps de la session et rien ne casse.
 ----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+-- JOUEURS COCHES ET JOUEURS VIRES
+--
+-- Deux ensembles d'UserId : ceux dont la base vaut le detour, et ceux qu'on
+-- ne veut plus voir dans la liste. Un id par ligne dans le fichier, comme
+-- pour les messages : lisible et corrigeable a la main.
+----------------------------------------------------------------------------------
+local Marks = {
+    fileMarked = "TradePlazaHub_coches.txt",
+    fileHidden = "TradePlazaHub_masques.txt",
+}
+
+local function loadIds(file)
+    if not (Env.isfile and Env.readfile) then return nil end
+    local ok, exists = pcall(Env.isfile, file)
+    if not ok or not exists then return nil end
+    local okRead, body = pcall(Env.readfile, file)
+    if not okRead or type(body) ~= "string" then return nil end
+
+    local set = {}
+    for line in string.gmatch(body, "[^\r\n]+") do
+        local id = tonumber(Util.trim(line))
+        if id then set[id] = true end
+    end
+    return set
+end
+
+local function saveIds(file, set)
+    if not Env.writefile then return end
+    local ids = {}
+    for id in pairs(set or {}) do ids[#ids + 1] = tostring(id) end
+    table.sort(ids)
+    pcall(Env.writefile, file, table.concat(ids, "\n"))
+end
+
+function Marks.load()
+    CONFIG.Marked = loadIds(Marks.fileMarked) or CONFIG.Marked or {}
+    CONFIG.Hidden = loadIds(Marks.fileHidden) or CONFIG.Hidden or {}
+end
+
+function Marks.isMarked(id) return CONFIG.Marked and CONFIG.Marked[id] == true end
+function Marks.isHidden(id) return CONFIG.Hidden and CONFIG.Hidden[id] == true end
+
+function Marks.setMarked(id, on)
+    CONFIG.Marked = CONFIG.Marked or {}
+    -- nil plutot que false : sinon l'ensemble grossit indefiniment de
+    -- joueurs decoches qu'on croise une fois
+    CONFIG.Marked[id] = on and true or nil
+    saveIds(Marks.fileMarked, CONFIG.Marked)
+end
+
+function Marks.setHidden(id, on)
+    CONFIG.Hidden = CONFIG.Hidden or {}
+    CONFIG.Hidden[id] = on and true or nil
+    saveIds(Marks.fileHidden, CONFIG.Hidden)
+end
+
+function Marks.clearHidden()
+    CONFIG.Hidden = {}
+    saveIds(Marks.fileHidden, CONFIG.Hidden)
+end
+
+function Marks.countHidden()
+    local n = 0
+    for _ in pairs(CONFIG.Hidden or {}) do n = n + 1 end
+    return n
+end
+
+----------------------------------------------------------------------------------
+-- DEMANDE DE TRADE
+--
+-- C'est la SEULE partie du script qui peut parler au serveur. Tout le reste
+-- lit sans jamais rien ecrire, et l'en-tete dit pourquoi : un remote appele
+-- avec des arguments que le serveur n'attend pas fait kick.
+--
+-- On procede donc comme Chat.compose, du plus sur au moins sur :
+--   1. le bouton de trade DU JEU, declenche par ses propres connexions.
+--      C'est le code du jeu qui construit alors ses arguments : rien n'est
+--      invente, c'est aussi sur qu'un vrai clic.
+--   2. seulement si ca echoue, un remote de trade avec le joueur en unique
+--      argument. C'est la signature la plus courante, mais ca reste un pari.
+--
+-- CONFIG.AllowTrade = false coupe tout et rend le script strictement lecture
+-- seule, comme avant l'ajout de ce bouton.
+----------------------------------------------------------------------------------
+local Trade = {}
+
+function Trade.findButton(player)
+    local gui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not gui then return nil end
+    local ok, list = pcall(function() return gui:GetDescendants() end)
+    if not ok then return nil end
+
+    local wanted, fallback = Util.lower(player.Name), nil
+    for _, d in ipairs(list) do
+        if d:IsA("GuiButton") then
+            local label = Util.lower(tostring(d.Name) .. " " .. tostring(d.Text or ""))
+            -- "trade" oui, mais surement pas le bouton qui l'annule
+            if string.find(label, "trade", 1, true)
+            and not string.find(label, "cancel", 1, true)
+            and not string.find(label, "decline", 1, true)
+            and not string.find(label, "refuse", 1, true)
+            and not string.find(label, "accept", 1, true) then
+                -- un bouton dont le cadre porte le pseudo vise ce joueur-la
+                local ctx = d.Parent
+                for _ = 1, 4 do
+                    if not ctx then break end
+                    if string.find(Util.lower(ctx.Name), wanted, 1, true) then return d end
+                    ctx = ctx.Parent
+                end
+                fallback = fallback or d
+            end
+        end
+    end
+    return fallback
+end
+
+-- Declenche les handlers que LE JEU a attaches au bouton. getconnections est
+-- une fonction d'executor : sans elle, un LocalScript ne peut pas declencher
+-- le clic d'un bouton qu'il n'a pas cree.
+function Trade.press(button)
+    if not button then return false, "bouton de trade introuvable" end
+
+    if type(getconnections) == "function" then
+        local ok, conns = pcall(getconnections, button.MouseButton1Click)
+        if ok and type(conns) == "table" and #conns > 0 then
+            local fired = 0
+            for _, c in ipairs(conns) do
+                if pcall(function() c:Fire() end) then fired = fired + 1 end
+            end
+            if fired > 0 then return true, "bouton du jeu declenche" end
+        end
+    end
+    if type(firesignal) == "function" then
+        if pcall(firesignal, button.MouseButton1Click) then
+            return true, "bouton du jeu declenche"
+        end
+    end
+    return false, "ton executor ne sait pas declencher un bouton"
+end
+
+function Trade.viaRemote(player)
+    local remote = Remotes:Find("SendTradeRequest") or Remotes:Find("TradeRequest")
+        or Remotes:Find("RequestTrade") or Remotes:Find("SendTrade")
+        or Remotes:Find("InviteTrade") or Remotes:Find("Trade")
+    if not remote then return false, "aucun remote de trade trouve" end
+    if not remote:IsA("RemoteEvent") then
+        return false, "le remote de trade n'est pas un RemoteEvent"
+    end
+    if not pcall(function() remote:FireServer(player) end) then
+        return false, "le remote a refuse l'appel"
+    end
+    log("trade envoye via %s", remote:GetFullName())
+    return true, "demande envoyee (remote)"
+end
+
+function Trade.send(player)
+    if not player then return false, "joueur introuvable" end
+    if CONFIG.AllowTrade == false then
+        return false, "envoi de trade desactive dans les reglages"
+    end
+
+    local button = Trade.findButton(player)
+    if button then
+        local ok, why = Trade.press(button)
+        if ok then return true, why end
+        log("bouton de trade trouve mais non declenchable : %s", tostring(why))
+    end
+    return Trade.viaRemote(player)
+end
+
 local Presets = { file = "TradePlazaHub_messages.txt" }
 
 function Presets.load()
@@ -2415,6 +2604,18 @@ Icon.plus = iconMaker(function(p)
     p(10, 5, 2, 12, 1)
 end)
 
+-- coche : deux barres, la courte qui descend, la longue qui remonte
+Icon.check = iconMaker(function(p)
+    p(4.2, 12, 6, 2.2, 1, 45)
+    p(7, 9.5, 12, 2.2, 1, -48)
+end)
+
+-- oeil : voir la base de quelqu'un
+Icon.eye = iconMaker(function(p, ring)
+    ring(3, 3, 16, 2)
+    p(8.5, 8.5, 5, 5, 2.5)
+end)
+
 local function pad(inst, all, top, bottom, left, right)
     return mk("UIPadding", {
         PaddingTop = UDim.new(0, top or all or 0),
@@ -2643,16 +2844,26 @@ local wordmark = mk("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Left, Parent = titleBar,
 })
 
+-- La pastille dit la verite sur le mode en cours : des que l'envoi de trade
+-- est autorise, le hub n'est plus en lecture seule et doit le montrer.
 local modePill = corner(mk("Frame", {
     Size = UDim2.new(0, 84, 0, 20), Position = UDim2.new(0, 170, 0.5, -10),
     BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = titleBar,
 }), 10)
-stroke(modePill, THEME.good, 1, 0.55)
-mk("TextLabel", {
+local modeStroke = stroke(modePill, THEME.good, 1, 0.55)
+local modeLabel = dynamic(mk("TextLabel", {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
     Font = Enum.Font.GothamBold, Text = "LECTURE SEULE", TextSize = 8,
     TextColor3 = THEME.good, Parent = modePill,
-})
+}))
+
+function UI.refreshMode()
+    local readOnly = (CONFIG.AllowTrade == false)
+    local color = readOnly and THEME.good or THEME.warn
+    modeLabel.Text = readOnly and "LECTURE SEULE" or "TRADE ACTIF"
+    tween(modeLabel, { TextColor3 = color }, 0.18)
+    tween(modeStroke, { Color = color }, 0.18)
+end
 
 -- bouton carre de la barre de titre, avec son icone dessinee
 local function chipButton(offsetX, color, iconFn, callback)
@@ -3304,7 +3515,7 @@ local scanBase, refreshPlayers
 local pagePlayers = addTab("Joueurs", Icon.users)
 
 local cardList = card(pagePlayers)
-local playersPanel = panel(cardList, 176)
+local playersPanel = panel(cardList, 250)
 btn(cardList, { text = "Rafraichir la liste", icon = Icon.sync, callback = function()
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
@@ -3312,51 +3523,171 @@ end })
 
 local cardBase = card(pagePlayers)
 local baseSummary = dynamic(note(cardBase, "", THEME.text))
+
+-- Barre "on le garde ?" : elle sort apres chaque scan pour degager d'un
+-- clic les bases sans interet, qui sinon encombrent la liste tout le reste
+-- de la partie.
+--
+-- Tout le bloc vit dans un do...end : Luau plafonne a 200 variables locales
+-- par fonction, et le corps du script en frolait la limite.
+local askKeep, hideKeepBar
+do
+    local keepBar = corner(mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = THEME.surface,
+        BorderSizePixel = 0, Visible = false, Parent = cardBase,
+    }), 10)
+    stroke(keepBar, THEME.line, 1.6, 0.3)
+
+    local keepText = dynamic(mk("TextLabel", {
+        Size = UDim2.new(1, -170, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "",
+        TextSize = 11, TextColor3 = THEME.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = keepBar,
+    }))
+
+    local keepTarget
+    hideKeepBar = function()
+        keepTarget = nil
+        keepBar.Visible = false
+    end
+
+    local yes = btn(keepBar, { text = "GARDER", width = 74, height = 26,
+        style = "primary", callback = hideKeepBar })
+    yes.Position = UDim2.new(1, -158, 0.5, -13)
+
+    local no = btn(keepBar, { text = "VIRER", width = 74, height = 26,
+        style = "danger", callback = function()
+            local plr = keepTarget
+            hideKeepBar()
+            if not plr then return end
+            Marks.setHidden(plr.UserId, true)
+            refreshPlayers()
+            if UI.refreshHidden then UI.refreshHidden() end
+            setStatus(plr.Name .. " retire de la liste", THEME.sub)
+        end })
+    no.Position = UDim2.new(1, -80, 0.5, -13)
+
+    askKeep = function(player)
+        if not player or CONFIG.AskOnScan == false then hideKeepBar() return end
+        keepTarget = player
+        keepText.Text = "Garder " .. player.Name .. " dans la liste ?"
+        keepBar.Visible = true
+    end
+end
+
 local brainrotPanel, _, brainrotGrid = gridPanel(cardBase, 330)
 
+-- Une ligne tient sur deux etages : identite en haut, actions en bas. En
+-- portrait, tout mettre sur une seule ligne ne laissait plus de place au
+-- pseudo une fois la case et les deux boutons poses.
 local function playerRow(scroll, plr)
+    local id = plr.UserId
+    local marked = Marks.isMarked(id)
+
     local row = corner(mk("Frame", {
-        Size = UDim2.new(1, -6, 0, 52), BackgroundColor3 = THEME.cardHi,
+        Size = UDim2.new(1, -6, 0, 76), BackgroundColor3 = THEME.cardHi,
         BorderSizePixel = 0, Parent = scroll,
     }), 11)
-    stroke(row, THEME.line, 1.6, 0.35)
+    local rowStroke = stroke(row, marked and THEME.good or THEME.line,
+        marked and 2 or 1.6, marked and 0.1 or 0.35)
 
-    local head = avatar(row, plr.UserId, 34)
-    head.Position = UDim2.new(0, 9, 0.5, -17)
+    -- bande verticale a gauche : elle dit d'un coup d'oeil, sans lire, que
+    -- cette base-la vaut le detour
+    local flag = corner(mk("Frame", {
+        Size = UDim2.new(0, 3, 1, -18), Position = UDim2.new(0, 0, 0, 9),
+        BackgroundColor3 = THEME.good, BackgroundTransparency = marked and 0 or 1,
+        BorderSizePixel = 0, Parent = row,
+    }), 2)
+
+    local box = corner(mk("TextButton", {
+        Size = UDim2.new(0, 20, 0, 20), Position = UDim2.new(0, 11, 0, 10),
+        BackgroundColor3 = marked and THEME.good or THEME.surface,
+        AutoButtonColor = false, Text = "", BorderSizePixel = 0, Parent = row,
+    }), 6)
+    local boxStroke = stroke(box, marked and THEME.good or THEME.line, 1.6, 0.25)
+    local tick = Icon.check(box, 14, THEME.bg)
+    tick.holder.Position = UDim2.new(0.5, -7, 0.5, -7)
+    for _, part in ipairs(tick.parts) do
+        part.BackgroundTransparency = marked and 0 or 1
+    end
+
+    local function setMarked(on)
+        Marks.setMarked(id, on)
+        tween(row, { BackgroundColor3 = THEME.cardHi }, 0.15)
+        tween(rowStroke, {
+            Color = on and THEME.good or THEME.line,
+            Thickness = on and 2 or 1.6,
+            Transparency = on and 0.1 or 0.35,
+        }, 0.18)
+        tween(flag, { BackgroundTransparency = on and 0 or 1 }, 0.18)
+        tween(box, { BackgroundColor3 = on and THEME.good or THEME.surface }, 0.18)
+        tween(boxStroke, { Color = on and THEME.good or THEME.line }, 0.18)
+        for _, part in ipairs(tick.parts) do
+            tween(part, { BackgroundTransparency = on and 0 or 1 }, 0.18)
+        end
+    end
+    Maid.conn(box.MouseButton1Click:Connect(function()
+        setMarked(not Marks.isMarked(id))
+    end))
+
+    local head = avatar(row, id, 30)
+    head.Position = UDim2.new(0, 38, 0, 6)
 
     mk("TextLabel", {
-        Size = UDim2.new(1, -150, 0, 15), Position = UDim2.new(0, 51, 0, 11),
+        Size = UDim2.new(1, -84, 0, 15), Position = UDim2.new(0, 74, 0, 7),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = plr.DisplayName ~= "" and plr.DisplayName or plr.Name, TextSize = 12,
         TextColor3 = THEME.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     mk("TextLabel", {
-        Size = UDim2.new(1, -150, 0, 13), Position = UDim2.new(0, 51, 0, 27),
+        Size = UDim2.new(1, -84, 0, 13), Position = UDim2.new(0, 74, 0, 23),
         BackgroundTransparency = 1, Font = Enum.Font.Code,
         Text = "@" .. plr.Name, TextSize = 10,
         TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local see = btn(row, { text = "BASE", icon = Icon.send, iconSize = 12,
-        width = 86, height = 30, style = "primary",
-        callback = function() scanBase(plr) end })
-    see.Position = UDim2.new(1, -94, 0.5, -15)
+    local sendBtn = btn(row, { text = "TRADE", icon = Icon.send, iconSize = 12,
+        width = 146, height = 26, style = "primary", callback = function()
+            local ok, why = Trade.send(plr)
+            setStatus((ok and "trade a " or "trade impossible : ")
+                .. (ok and plr.Name or tostring(why)),
+                ok and THEME.good or THEME.bad)
+        end })
+    sendBtn.Position = UDim2.new(0, 9, 0, 42)
+
+    local see = btn(row, { text = "BASE", icon = Icon.eye, iconSize = 13,
+        width = 146, height = 26, callback = function() scanBase(plr) end })
+    see.Position = UDim2.new(1, -155, 0, 42)
     return row
 end
 
 refreshPlayers = function()
     clearChildren(playersPanel)
-    local shown = 0
+
+    local list, hidden = {}, 0
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
-            shown = shown + 1
-            playerRow(playersPanel, plr)
+            if Marks.isHidden(plr.UserId) then hidden = hidden + 1
+            else list[#list + 1] = plr end
         end
     end
-    if shown == 0 then
-        textLine(playersPanel, "aucun autre joueur dans le serveur", THEME.sub, Enum.Font.Gotham)
+
+    -- les coches remontent en tete : c'est tout l'interet de la case
+    table.sort(list, function(a, b)
+        local ma, mb = Marks.isMarked(a.UserId), Marks.isMarked(b.UserId)
+        if ma ~= mb then return ma end
+        return Util.lower(a.Name) < Util.lower(b.Name)
+    end)
+
+    for _, plr in ipairs(list) do playerRow(playersPanel, plr) end
+
+    if #list == 0 then
+        textLine(playersPanel, hidden > 0
+            and ("les " .. hidden .. " autres joueurs sont masques")
+            or "aucun autre joueur dans le serveur", THEME.sub, Enum.Font.Gotham)
     end
 end
 
@@ -3496,6 +3827,9 @@ scanBase = function(player, model, ownerName)
 
     State.Plot, State.PlotOwner, State.PlotPlayer = plot, ownerName, player
     clearChildren(brainrotPanel)
+    -- On propose de virer le joueur meme quand la base est vide ou masquee :
+    -- c'est justement la qu'on veut le sortir de la liste.
+    askKeep(player)
 
     -- La cellule fait exactement la taille d'une vignette : le nombre de
     -- colonnes tombe tout seul de la largeur disponible, et la grille reste
@@ -3576,6 +3910,9 @@ local refreshLangNote
 -- Bandeau de langue : ce qu'on a detecte chez l'autre, et la langue dans
 -- laquelle ta reponse va partir. Les deux selecteurs vivent dans Reglages :
 -- ici on ne garde que l'etat, c'est ce qu'on lit en pleine conversation.
+-- Bloc dans un do...end : Luau plafonne a 200 variables locales par
+-- fonction, et ces trois-la ne servent qu'a refreshLangNote.
+do
 local langStrip = corner(mk("Frame", {
     Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = THEME.surface,
     BorderSizePixel = 0, Parent = pageChat,
@@ -3619,6 +3956,7 @@ refreshLangNote = function()
     detectFrom.TextColor3 = State.LastDetected and THEME.good or THEME.sub
     detectTo.Text = langName(lang)
 end
+end
 
 -- appele par le traducteur des qu'un fournisseur nous rend la langue source
 function UI.setDetected(code)
@@ -3642,10 +3980,12 @@ local sendReply
 
 -- Bande de messages tout prets, juste au-dessus de la saisie : un clic
 -- traduit et envoie, sans passer par le clavier.
+local presetScroll
+do
 local presetBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = cardConv,
 })
-local presetScroll = mk("ScrollingFrame", {
+presetScroll = mk("ScrollingFrame", {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
     ScrollBarThickness = 2, ScrollBarImageColor3 = THEME.accent,
     CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.X,
@@ -3696,6 +4036,7 @@ function UI.refreshPresets()
             if sendReply then spawnTask(function() sendReply(text) end) end
         end))
     end
+end
 end
 
 local chatField = field(cardConv, "Ecris dans ta langue...",
@@ -3860,7 +4201,13 @@ end
 
 ----------------------------------------------------------------------------------
 -- ONGLET : REGLAGES
+--
+-- Tout l'onglet vit dans un do...end. Luau plafonne a 200 variables locales
+-- par fonction et le corps du script atteignait la limite : les cartes de
+-- reglages n'ont aucune raison d'exister en dehors d'ici.
 ----------------------------------------------------------------------------------
+local presetListPanel, refreshPresetList
+do
 local pageSettings = addTab("Reglages", Icon.tune)
 
 -- Les deux langues vivent ici, pas dans le Chat : on les choisit une fois,
@@ -3885,10 +4232,10 @@ end)
 -- Messages tout prets : on les cree ici, on les envoie depuis l'onglet Chat
 ----------------------------------------------------------------------------------
 local cardPresets = card(pageSettings, "Messages tout prets")
-local presetListPanel = panel(cardPresets, 150)
+presetListPanel = panel(cardPresets, 150)
 local presetInput
 
-local function refreshPresetList()
+refreshPresetList = function()
     clearChildren(presetListPanel)
     local list = CONFIG.Presets or {}
     if #list == 0 then
@@ -3998,12 +4345,44 @@ for _, f in ipairs(RARITY_FILTERS) do
 end
 switch(cardFilter, "Rarete inconnue", "ShowUnknown", function() redrawBase() end)
 
+----------------------------------------------------------------------------------
+-- Liste des joueurs
+----------------------------------------------------------------------------------
+local cardPlayers = card(pageSettings, "Liste des joueurs")
+switch(cardPlayers, "Demander avant de garder un joueur", "AskOnScan")
+
+-- Le seul reglage du script qui parle au serveur. Coupe-le et le hub
+-- redevient strictement en lecture seule.
+switch(cardPlayers, "Autoriser l'envoi de trade", "AllowTrade", function()
+    if UI.refreshMode then UI.refreshMode() end
+end)
+
+do
+    local hiddenNote = dynamic(note(cardPlayers, "", THEME.sub))
+    local function refreshHidden()
+        local n = Marks.countHidden()
+        hiddenNote.Text = (n == 0) and "aucun joueur masque"
+            or (n .. " joueur(s) masque(s)")
+    end
+    btn(cardPlayers, { text = "Reafficher tous les joueurs", icon = Icon.users,
+        callback = function()
+            Marks.clearHidden()
+            refreshHidden()
+            refreshPlayers()
+            setStatus("joueurs masques reaffiches", THEME.good)
+        end })
+    refreshHidden()
+    UI.refreshHidden = refreshHidden
+end
+
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
 slider(cardDisplay, "Taille de l'apercu 3D", "ModelSize", 48, 220, " px", function()
     redrawBase()
 end)
+
+end
 
 ----------------------------------------------------------------------------------
 -- BOUTONS FENETRE / RACCOURCI / UNLOAD
@@ -4061,6 +4440,11 @@ UI.select("Joueurs")
 Presets.load()
 refreshPresetList()
 if UI.refreshPresets then UI.refreshPresets() end
+
+-- joueurs coches et joueurs vires lors des sessions precedentes
+Marks.load()
+if UI.refreshHidden then UI.refreshHidden() end
+if UI.refreshMode then UI.refreshMode() end
 
 -- couleur choisie au lancement precedent
 do
