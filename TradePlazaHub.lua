@@ -624,20 +624,37 @@ function Plots:All()
     return out
 end
 
+-- Renvoie model, cframe, sur -- ou `sur` dit si le proprietaire a vraiment
+-- ete identifie, ou si on a devine par proximite.
+--
+-- L'ancien repli prenait N'IMPORTE QUELLE base a moins de 200 studs du
+-- joueur vise. Au Trade Plaza tout le monde se tient au meme endroit :
+-- il renvoyait donc regulierement TA base. C'est ce qui faisait scanner la
+-- mauvaise base et teleporter chez soi au lieu du joueur demande.
 function Plots:ForPlayer(player)
-    for _, entry in ipairs(self:All()) do
-        if entry.owner == player then return entry.model, entry.cframe end
+    local all = self:All()
+
+    for _, entry in ipairs(all) do
+        if entry.owner == player then return entry.model, entry.cframe, true end
     end
+
+    -- Repli par proximite, mais JAMAIS sur une base dont on a reconnu un
+    -- autre proprietaire, et sur la plus proche seulement.
     local char = player and player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if root then
-        for _, entry in ipairs(self:All()) do
-            if entry.cframe and (entry.cframe.Position - root.Position).Magnitude < 200 then
-                return entry.model, entry.cframe
+        local best, bestDist
+        for _, entry in ipairs(all) do
+            if entry.cframe and not entry.owner then
+                local d = (entry.cframe.Position - root.Position).Magnitude
+                if d < 120 and (not bestDist or d < bestDist) then
+                    best, bestDist = entry, d
+                end
             end
         end
+        if best then return best.model, best.cframe, false end
     end
-    return nil, nil
+    return nil, nil, false
 end
 
 ----------------------------------------------------------------------------------
@@ -1777,22 +1794,34 @@ function Movement.goTo(position, label)
             end)
         end
 
-        while not State.Unloaded and Movement.token == mine do
-            local c = LocalPlayer.Character
-            local r = c and c:FindFirstChild("HumanoidRootPart")
-            -- personnage remplace ou mort en route : on lache tout
-            if not r or r ~= root then release() return end
-            if hum and hum.Health <= 0 then release() return end
+        -- Trajet en trois temps : on monte au-dessus des toits, on traverse
+        -- en altitude, puis on redescend. En ligne droite on se faisait
+        -- trainer a travers les batiments et les zones du sol.
+        local cruise = math.max(root.Position.Y, dest.Y) + 40
+        local legs = {
+            Vector3.new(root.Position.X, cruise, root.Position.Z),
+            Vector3.new(dest.X, cruise, dest.Z),
+            dest,
+        }
 
-            local delta = dest - r.Position
-            local dist = delta.Magnitude
-            if dist < 6 then break end
+        for _, leg in ipairs(legs) do
+            while not State.Unloaded and Movement.token == mine do
+                local c = LocalPlayer.Character
+                local r = c and c:FindFirstChild("HumanoidRootPart")
+                -- personnage remplace ou mort en route : on lache tout
+                if not r or r ~= root then release() return end
+                if hum and hum.Health <= 0 then release() return end
 
-            local dt = RunService.Heartbeat:Wait()
-            local step = math.min(dist, speed * dt)
-            if not pcall(function()
-                r.CFrame = CFrame.new(r.Position + delta.Unit * step)
-            end) then release() return end
+                local delta = leg - r.Position
+                local dist = delta.Magnitude
+                if dist < 4 then break end
+
+                local dt = RunService.Heartbeat:Wait()
+                local step = math.min(dist, speed * dt)
+                if not pcall(function()
+                    r.CFrame = CFrame.new(r.Position + delta.Unit * step)
+                end) then release() return end
+            end
         end
 
         -- Repose en douceur : on rend le controle au moteur, la chute
@@ -3973,11 +4002,14 @@ local function playerRow(scroll, plr)
                 setStatus(tostring(carpetWhy), THEME.warn)
             end
 
-            local plot, cf = Plots:ForPlayer(plr)
-            local target = cf and cf.Position
+            -- La base seulement si elle est SURE. Sinon on vise le joueur
+            -- lui-meme : mieux vaut atterrir a cote de lui que sur une base
+            -- devinee, qui s'est deja revelee etre la sienne.
+            local _, cf, sure = Plots:ForPlayer(plr)
+            local target = sure and cf and cf.Position
+            local where = sure and ("base de " .. plr.Name) or plr.Name
+
             if not target then
-                -- pas de plot : on vise le joueur lui-meme, ce qui marche
-                -- au Trade Plaza ou les stands sont a cote de leur
                 local c = plr.Character
                 local r = c and c:FindFirstChild("HumanoidRootPart")
                 target = r and r.Position
@@ -3987,7 +4019,7 @@ local function playerRow(scroll, plr)
                 return
             end
 
-            local ok, why = Movement.goTo(target, plr.Name)
+            local ok, why = Movement.goTo(target, where)
             setStatus(tostring(why), ok and THEME.good or THEME.bad)
         end })
     tpBtn.Position = UDim2.new(0, 111, 0, 42)
@@ -4155,7 +4187,14 @@ end
 scanBase = function(player, model, ownerName)
     local plot = model
     ownerName = ownerName or (player and player.Name) or "?"
-    if not plot and player then plot = Plots:ForPlayer(player) end
+    -- On ne scanne une base que si son proprietaire a ete reconnu. Sinon on
+    -- passe en lecture de proximite autour du joueur : deviner la base par
+    -- distance revenait a scanner celle du voisin -- souvent la tienne -- et
+    -- a annoncer chez lui des pieces qu'il n'a jamais eues.
+    if not plot and player then
+        local guess, _, sure = Plots:ForPlayer(player)
+        if sure then plot = guess end
+    end
 
     State.Plot, State.PlotOwner, State.PlotPlayer = plot, ownerName, player
     clearChildren(brainrotPanel)
