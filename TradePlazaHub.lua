@@ -7,20 +7,26 @@
     Le hub lit ce qui est deja charge chez toi et l'affiche. Il ne deplace
     pas le personnage et n'installe aucun hook.
 
-    UNE SEULE EXCEPTION : le bouton TRADE des lignes de joueur. Il essaie
-    d'abord de declencher le bouton de trade DU JEU (via getconnections),
-    auquel cas c'est le code du jeu qui construit ses propres arguments et
-    le risque est celui d'un vrai clic. Si ca echoue seulement, il appelle
-    un remote de trade avec le joueur en argument -- et la, c'est un pari.
+    DEUX EXCEPTIONS, toutes deux coupables dans Reglages :
 
-    Mets CONFIG.AllowTrade = false, ou coupe l'interrupteur dans Reglages,
-    et le hub redevient strictement en lecture seule.
+    1. Le bouton TRADE. Il appelle le remote d'invitation du jeu avec le
+       joueur vise en argument -- la meme chose que fait le bouton du jeu.
+       Sur "Steal a Brainrot" c'est RF/TradeService/Invite, une
+       RemoteFunction : InvokeServer, pas FireServer. En secours seulement,
+       il essaie de declencher le bouton du jeu via getconnections.
+       Coupe-le avec CONFIG.AllowTrade = false.
+
+    2. Le bouton TP. C'EST LE PLUS RISQUE DU SCRIPT. Le serveur compare ta
+       position d'une frame a l'autre avec ta WalkSpeed : un saut sec a
+       l'autre bout de la carte est impossible a justifier et fait kick.
+       Par defaut on equipe donc le tapis volant puis on GLISSE en continu
+       a vitesse reglable, ce qui ressemble a un vrai vol.
+       CONFIG.InstantTeleport = true remet le saut sec, bien plus voyant.
+       Coupe tout avec CONFIG.AllowTeleport = false.
 
     Ce qui reste volontairement absent, et pourquoi :
-      - deplacement (vol BodyVelocity, marche auto, CFrame, noclip)
-        -> le serveur compare ta position d'une frame a l'autre avec ta
-           WalkSpeed : peu importe COMMENT tu bouges, la trajectoire est
-           impossible et c'est ca qui fait kick.
+      - marche auto, noclip, BodyVelocity
+        -> meme raison que ci-dessus, sans le pretexte du tapis.
       - envoi de chat par remote
         -> on passe par la zone de saisie du jeu, qui envoie elle-meme.
       - hookmetamethod sur __namecall
@@ -111,9 +117,18 @@ local CONFIG = {
     Hidden      = {},
     AskOnScan   = true,   -- demander "on le garde ?" apres chaque scan
 
-    -- Envoi de demande de trade. C'est la SEULE chose du script qui peut
-    -- parler au serveur : mets false pour rester en lecture seule totale.
+    -- Envoi de demande de trade. Mets false pour ne plus rien envoyer.
     AllowTrade  = true,
+    -- Chemin d'un remote d'invitation impose, si la detection se trompe.
+    -- Exemple : "ReplicatedStorage.Packages.Net.RF/TradeService/Invite"
+    TradeRemote = "",
+
+    -- Deplacement vers une base. Le plus risque du script : lis le pave au
+    -- dessus du module Movement avant de toucher a ces valeurs.
+    AllowTeleport   = true,
+    InstantTeleport = false,  -- true = saut sec, bien plus voyant
+    TeleportSpeed   = 120,    -- studs par seconde en mode glisse
+    TeleportHeight  = 8,      -- hauteur d'arrivee au-dessus de la base
 
     -- Filtre de la base : decoche un palier dans Reglages et ses pieces
     -- disparaissent de l'affichage. Pratique pour ne voir que le haut du
@@ -1476,19 +1491,72 @@ function Trade.press(button)
     return false, "ton executor ne sait pas declencher un bouton"
 end
 
-function Trade.viaRemote(player)
-    local remote = Remotes:Find("SendTradeRequest") or Remotes:Find("TradeRequest")
-        or Remotes:Find("RequestTrade") or Remotes:Find("SendTrade")
-        or Remotes:Find("InviteTrade") or Remotes:Find("Trade")
-    if not remote then return false, "aucun remote de trade trouve" end
-    if not remote:IsA("RemoteEvent") then
-        return false, "le remote de trade n'est pas un RemoteEvent"
+-- Un remote d'invitation de trade porte "invite", mais tout ce qui porte
+-- "invite" n'invite pas : AcceptInvite, DeclineInvite et InviteResult sont
+-- les reponses, et DuelsMachineService invite en duel, pas en trade.
+local TRADE_REJECT = { "accept", "decline", "result", "cancel", "duel" }
+
+function Trade.remote()
+    if Trade.cached and Trade.cached.Parent then return Trade.cached end
+
+    local forced = CONFIG.TradeRemote
+    if forced and forced ~= "" then
+        local node = Util.dottedPath(forced)
+        if node and isRemote(node) then
+            Trade.cached = node
+            log("remote de trade force -> %s", node:GetFullName())
+            return node
+        end
     end
+
+    local best, bestScore = nil, 0
+    for _, d in ipairs(allRemotes()) do
+        local full = Util.lower(d:GetFullName())
+        if string.find(full, "invite", 1, true) then
+            local rejected = false
+            for _, bad in ipairs(TRADE_REJECT) do
+                if string.find(full, bad, 1, true) then rejected = true break end
+            end
+            if not rejected then
+                local score = 1
+                if string.find(full, "tradeservice", 1, true) then score = score + 10 end
+                if string.find(full, "trade", 1, true) then score = score + 5 end
+                -- ".../Invite" tout court est l'appel, pas un evenement annexe
+                if string.find(full, "/invite", 1, true) then score = score + 4 end
+                if d:IsA("RemoteFunction") then score = score + 2 end
+                if score > bestScore then best, bestScore = d, score end
+            end
+        end
+    end
+
+    if best then
+        Trade.cached = best
+        log("remote de trade -> %s (%s)", best:GetFullName(), best.ClassName)
+    end
+    return best
+end
+
+function Trade.viaRemote(player)
+    local remote = Trade.remote()
+    if not remote then return false, "aucun remote d'invitation trouve" end
+
+    -- RF/TradeService/Invite est une RemoteFunction : il faut InvokeServer,
+    -- pas FireServer. C'est ce qui faisait echouer l'envoi silencieusement.
+    if remote:IsA("RemoteFunction") then
+        local ok, res = pcall(function() return remote:InvokeServer(player) end)
+        if not ok then return false, "le serveur a rejete l'appel" end
+        log("trade via %s -> %s", remote:GetFullName(), tostring(res))
+        -- beaucoup de services renvoient false quand l'invitation n'a pas pu
+        -- partir (deja en trade, invitations coupees, joueur trop loin)
+        if res == false then return false, "le serveur a refuse l'invitation" end
+        return true, "invitation envoyee"
+    end
+
     if not pcall(function() remote:FireServer(player) end) then
         return false, "le remote a refuse l'appel"
     end
-    log("trade envoye via %s", remote:GetFullName())
-    return true, "demande envoyee (remote)"
+    log("trade via %s", remote:GetFullName())
+    return true, "invitation envoyee"
 end
 
 function Trade.send(player)
@@ -1497,13 +1565,117 @@ function Trade.send(player)
         return false, "envoi de trade desactive dans les reglages"
     end
 
+    -- Le remote d'abord maintenant qu'on sait le reconnaitre : c'est l'API
+    -- du jeu elle-meme, donc les memes arguments qu'un vrai clic. Le bouton
+    -- ne sert plus que de secours, car un bouton mal identifie "reussit"
+    -- sans rien envoyer, ce qui est pire qu'un echec franc.
+    local ok, why = Trade.viaRemote(player)
+    if ok then return true, why end
+
     local button = Trade.findButton(player)
     if button then
-        local ok, why = Trade.press(button)
-        if ok then return true, why end
-        log("bouton de trade trouve mais non declenchable : %s", tostring(why))
+        local pressed, pwhy = Trade.press(button)
+        if pressed then return true, pwhy end
+        log("bouton de trade trouve mais non declenchable : %s", tostring(pwhy))
     end
-    return Trade.viaRemote(player)
+    return false, why
+end
+
+----------------------------------------------------------------------------------
+-- DEPLACEMENT VERS UNE BASE
+--
+-- ATTENTION, c'est le point le plus risque du script. Le serveur compare ta
+-- position d'une frame a l'autre avec ta WalkSpeed : un saut instantane a
+-- l'autre bout de la carte est impossible a justifier et fait kick.
+--
+-- D'ou le fonctionnement par defaut : on equipe d'abord le tapis volant,
+-- puis on GLISSE vers la base a une vitesse reglable, en continu. Une
+-- trajectoire continue avec un objet de vol equipe est ce qui ressemble le
+-- plus a un vrai deplacement.
+--
+-- CONFIG.InstantTeleport = true remet le saut sec, plus rapide et bien plus
+-- voyant. CONFIG.AllowTeleport = false coupe tout.
+----------------------------------------------------------------------------------
+local Movement = { token = 0 }
+
+local CARPET_WORDS = { "carpet", "tapis", "rug", "magiccarpet", "flyingcarpet" }
+
+function Movement.findCarpet()
+    local function scan(container)
+        if not container then return nil end
+        for _, tool in ipairs(container:GetChildren()) do
+            if tool:IsA("Tool") then
+                local n = Util.lower(tool.Name)
+                for _, word in ipairs(CARPET_WORDS) do
+                    if string.find(n, word, 1, true) then return tool end
+                end
+            end
+        end
+        return nil
+    end
+    -- deja en main d'abord, sinon dans le sac
+    return scan(LocalPlayer.Character)
+        or scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+end
+
+function Movement.equipCarpet()
+    local tool = Movement.findCarpet()
+    if not tool then return false, "tapis volant introuvable dans le sac" end
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false, "personnage absent" end
+    if tool.Parent == char then return true, "tapis deja en main" end
+
+    if not pcall(function() hum:EquipTool(tool) end) then
+        return false, "impossible d'equiper le tapis"
+    end
+    return true, "tapis equipe"
+end
+
+function Movement.stop()
+    Movement.token = Movement.token + 1
+end
+
+function Movement.goTo(position, label)
+    if CONFIG.AllowTeleport == false then
+        return false, "deplacement desactive dans les reglages"
+    end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false, "personnage absent" end
+
+    local dest = position + Vector3.new(0, tonumber(CONFIG.TeleportHeight) or 8, 0)
+
+    if CONFIG.InstantTeleport then
+        if not pcall(function() root.CFrame = CFrame.new(dest) end) then
+            return false, "deplacement refuse"
+        end
+        return true, "arrive chez " .. tostring(label or "?")
+    end
+
+    Movement.token = Movement.token + 1
+    local mine = Movement.token
+    local speed = math.max(20, tonumber(CONFIG.TeleportSpeed) or 120)
+
+    spawnTask(function()
+        while not State.Unloaded and Movement.token == mine do
+            local c = LocalPlayer.Character
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            if not r then break end
+
+            local delta = dest - r.Position
+            local dist = delta.Magnitude
+            if dist < 6 then break end
+
+            local dt = RunService.Heartbeat:Wait()
+            local step = math.min(dist, speed * dt)
+            if not pcall(function()
+                r.CFrame = CFrame.new(r.Position + delta.Unit * step)
+            end) then break end
+        end
+    end)
+    return true, "en route vers " .. tostring(label or "?")
 end
 
 local Presets = { file = "TradePlazaHub_messages.txt" }
@@ -2616,6 +2788,14 @@ Icon.eye = iconMaker(function(p, ring)
     p(8.5, 8.5, 5, 5, 2.5)
 end)
 
+-- double chevron vers le haut : filer sur place
+Icon.jump = iconMaker(function(p)
+    p(4.6, 8.4, 9, 2.2, 1.1, -45)
+    p(8.4, 8.4, 9, 2.2, 1.1, 45)
+    p(4.6, 14, 9, 2.2, 1.1, -45)
+    p(8.4, 14, 9, 2.2, 1.1, 45)
+end)
+
 local function pad(inst, all, top, bottom, left, right)
     return mk("UIPadding", {
         PaddingTop = UDim.new(0, top or all or 0),
@@ -2858,9 +3038,10 @@ local modeLabel = dynamic(mk("TextLabel", {
 }))
 
 function UI.refreshMode()
-    local readOnly = (CONFIG.AllowTrade == false)
+    local readOnly = (CONFIG.AllowTrade == false) and (CONFIG.AllowTeleport == false)
     local color = readOnly and THEME.good or THEME.warn
-    modeLabel.Text = readOnly and "LECTURE SEULE" or "TRADE ACTIF"
+    modeLabel.Text = readOnly and "LECTURE SEULE"
+        or (CONFIG.AllowTeleport ~= false and "TP ACTIF" or "TRADE ACTIF")
     tween(modeLabel, { TextColor3 = color }, 0.18)
     tween(modeStroke, { Color = color }, 0.18)
 end
@@ -3649,18 +3830,47 @@ local function playerRow(scroll, plr)
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local sendBtn = btn(row, { text = "TRADE", icon = Icon.send, iconSize = 12,
-        width = 146, height = 26, style = "primary", callback = function()
+    local sendBtn = btn(row, { text = "TRADE", icon = Icon.send, iconSize = 11,
+        width = 96, height = 26, textSize = 10, style = "primary",
+        callback = function()
             local ok, why = Trade.send(plr)
-            setStatus((ok and "trade a " or "trade impossible : ")
-                .. (ok and plr.Name or tostring(why)),
+            setStatus((ok and ("trade envoye a " .. plr.Name)
+                            or ("trade impossible : " .. tostring(why))),
                 ok and THEME.good or THEME.bad)
         end })
     sendBtn.Position = UDim2.new(0, 9, 0, 42)
 
-    local see = btn(row, { text = "BASE", icon = Icon.eye, iconSize = 13,
-        width = 146, height = 26, callback = function() scanBase(plr) end })
-    see.Position = UDim2.new(1, -155, 0, 42)
+    local tpBtn = btn(row, { text = "TP", icon = Icon.jump, iconSize = 12,
+        width = 94, height = 26, textSize = 10, callback = function()
+            -- le tapis d'abord : c'est lui qui rend le vol plausible
+            local okCarpet, carpetWhy = Movement.equipCarpet()
+            if not okCarpet then
+                setStatus(tostring(carpetWhy), THEME.warn)
+            end
+
+            local plot, cf = Plots:ForPlayer(plr)
+            local target = cf and cf.Position
+            if not target then
+                -- pas de plot : on vise le joueur lui-meme, ce qui marche
+                -- au Trade Plaza ou les stands sont a cote de leur
+                local c = plr.Character
+                local r = c and c:FindFirstChild("HumanoidRootPart")
+                target = r and r.Position
+            end
+            if not target then
+                setStatus("impossible de situer " .. plr.Name, THEME.bad)
+                return
+            end
+
+            local ok, why = Movement.goTo(target, plr.Name)
+            setStatus(tostring(why), ok and THEME.good or THEME.bad)
+        end })
+    tpBtn.Position = UDim2.new(0, 111, 0, 42)
+
+    local see = btn(row, { text = "BASE", icon = Icon.eye, iconSize = 12,
+        width = 96, height = 26, textSize = 10,
+        callback = function() scanBase(plr) end })
+    see.Position = UDim2.new(0, 211, 0, 42)
     return row
 end
 
@@ -3737,7 +3947,7 @@ local function brainrotTile(scroll, entry, index)
     local col  = rarityColor(entry.rarity)
 
     local tile = corner(mk("Frame", {
-        Size = UDim2.new(0, size + 16, 0, size + 76), BackgroundColor3 = THEME.card,
+        Size = UDim2.new(0, size + 16, 0, size + 62), BackgroundColor3 = THEME.card,
         BackgroundTransparency = 1, BorderSizePixel = 0, Parent = scroll,
     }), 10)
     local tileStroke = stroke(tile, col, 1.5, 1)
@@ -3781,6 +3991,29 @@ local function brainrotTile(scroll, entry, index)
         })
     end
 
+    -- Mutation et traits en bandeau SUR l'apercu 3D, pas en ligne de texte
+    -- sous le nom : ils appartiennent a la piece, et sous la vignette ils
+    -- volaient la place au nom et au revenu.
+    local extras = {}
+    if entry.mutation then extras[#extras + 1] = entry.mutation end
+    if entry.traits then extras[#extras + 1] = entry.traits end
+    if #extras > 0 then
+        local ribbon = corner(mk("Frame", {
+            Size = UDim2.new(0, size - 12, 0, 16),
+            Position = UDim2.new(0, 14, 0, size - 12),
+            BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.12,
+            BorderSizePixel = 0, ZIndex = 5, Parent = tile,
+        }), 8)
+        stroke(ribbon, THEME.good, 1, 0.4)
+        mk("TextLabel", {
+            Size = UDim2.new(1, -8, 1, 0), Position = UDim2.new(0, 4, 0, 0),
+            BackgroundTransparency = 1, ZIndex = 6, Font = Enum.Font.GothamBold,
+            Text = table.concat(extras, " / "), TextSize = 9,
+            TextColor3 = THEME.good,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = ribbon,
+        })
+    end
+
     mk("TextLabel", {
         Size = UDim2.new(1, -12, 0, 15), Position = UDim2.new(0, 6, 0, size + 10),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = entry.name,
@@ -3788,7 +4021,6 @@ local function brainrotTile(scroll, entry, index)
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
     })
 
-    -- la rarete sur sa ligne, a la couleur du palier
     mk("TextLabel", {
         Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 6, 0, size + 26),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
@@ -3797,26 +4029,24 @@ local function brainrotTile(scroll, entry, index)
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
     })
 
-    -- mutation et traits sur la suivante : c'est ce qui fait la valeur reelle
-    -- de la piece, deux Tralalero ne valent pas pareil selon leur mutation
-    local extras = {}
-    if entry.mutation then extras[#extras + 1] = entry.mutation end
-    if entry.traits then extras[#extras + 1] = entry.traits end
+    -- Ce que la piece rapporte, A L'UNITE : c'est la valeur d'un brainrot,
+    -- pas celle de la pile. Le cumul de la pile part en petit a cote.
     mk("TextLabel", {
-        Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 6, 0, size + 39),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-        Text = #extras > 0 and table.concat(extras, " / ") or "sans mutation",
-        TextSize = 10,
-        TextColor3 = #extras > 0 and THEME.good or THEME.dim,
-        TextTruncate = Enum.TextTruncate.AtEnd, Parent = tile,
-    })
-
-    mk("TextLabel", {
-        Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, size + 54),
+        Size = UDim2.new(1, -12, 0, 17), Position = UDim2.new(0, 6, 0, size + 40),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = entry.total > 0 and ("$" .. Util.short(entry.total) .. "/s") or "-",
-        TextSize = 13, TextColor3 = THEME.accent, Parent = tile,
+        Text = entry.income > 0 and ("$" .. Util.short(entry.income) .. "/s") or "-",
+        TextSize = 14, TextColor3 = THEME.accent,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = tile,
     })
+    if entry.count > 1 and entry.total > entry.income then
+        mk("TextLabel", {
+            Size = UDim2.new(1, -12, 0, 17), Position = UDim2.new(0, 6, 0, size + 40),
+            BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+            Text = "= $" .. Util.short(entry.total) .. "/s", TextSize = 10,
+            TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Right,
+            Parent = tile,
+        })
+    end
     return tile
 end
 
@@ -3835,7 +4065,7 @@ scanBase = function(player, model, ownerName)
     -- colonnes tombe tout seul de la largeur disponible, et la grille reste
     -- centree quand la derniere rangee est incomplete.
     local size = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
-    brainrotGrid.CellSize = UDim2.new(0, size + 16, 0, size + 76)
+    brainrotGrid.CellSize = UDim2.new(0, size + 16, 0, size + 62)
 
     local list, total, count, mode = {}, 0, 0, "base"
     if plot then list, total, count = Inspector.brainrots(plot) end
@@ -4351,11 +4581,16 @@ switch(cardFilter, "Rarete inconnue", "ShowUnknown", function() redrawBase() end
 local cardPlayers = card(pageSettings, "Liste des joueurs")
 switch(cardPlayers, "Demander avant de garder un joueur", "AskOnScan")
 
--- Le seul reglage du script qui parle au serveur. Coupe-le et le hub
--- redevient strictement en lecture seule.
+-- Les deux reglages qui sortent de la lecture seule. Coupe-les et le hub
+-- ne fait plus que lire.
 switch(cardPlayers, "Autoriser l'envoi de trade", "AllowTrade", function()
     if UI.refreshMode then UI.refreshMode() end
 end)
+switch(cardPlayers, "Autoriser le TP vers une base", "AllowTeleport", function()
+    if UI.refreshMode then UI.refreshMode() end
+end)
+switch(cardPlayers, "TP instantane (bien plus voyant)", "InstantTeleport")
+slider(cardPlayers, "Vitesse du TP", "TeleportSpeed", 40, 400, " st/s")
 
 do
     local hiddenNote = dynamic(note(cardPlayers, "", THEME.sub))
