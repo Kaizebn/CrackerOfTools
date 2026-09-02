@@ -117,6 +117,19 @@ local CONFIG = {
         "dragon cannelloni",
     },
 
+    -- Messages tout prets : un clic dessus les traduit et les envoie dans le
+    -- chat du jeu, comme si tu les avais tapes. Tu peux en ajouter et en
+    -- retirer depuis l'onglet Reglages ; ils sont gardes d'un lancement a
+    -- l'autre quand ton executor sait ecrire des fichiers.
+    Presets = {
+        "salut, tu veux trade ?",
+        "c'est quoi ton meilleur brainrot ?",
+        "je te propose ca, ca te va ?",
+        "non merci, pas interesse",
+        "ok ca marche, viens sur ma base",
+        "attends 2 minutes je reviens",
+    },
+
     -- decor de la base pris a tort pour un brainrot : compare en minuscules,
     -- en sous-chaine. Ajoute-en si le scanner ramene encore du mobilier.
     IgnoreNames  = { "lock base", "base lock", "unlock", "lock", "locked",
@@ -173,6 +186,11 @@ Env.request        = (syn and syn.request) or (http and http.request)
 Env.clipboard      = setclipboard or toclipboard or (syn and syn.write_clipboard)
 Env.gethui         = gethui
 Env.isExecutor     = (Env.request ~= nil) or (gethui ~= nil)
+-- Ecriture de fichier : tous les executors ne l'ont pas. Quand elle manque,
+-- les messages tout prets vivent le temps de la session, sans rien casser.
+Env.writefile      = writefile
+Env.readfile       = readfile
+Env.isfile         = isfile
 
 local function spawnTask(fn)
     if task and task.spawn then return task.spawn(fn) end
@@ -759,11 +777,19 @@ function Inspector.brainrots(plot)
         end
     end
 
-    -- d'abord les brainrots epingles dans l'ordre de CONFIG.TopBrainrots,
-    -- puis les plus rares, puis le meilleur revenu, puis la quantite
+    -- Ordre : les epingles de CONFIG.TopBrainrots, puis le revenu A L'UNITE,
+    -- puis la rarete, puis le revenu cumule, puis la quantite.
+    --
+    -- Le revenu passe AVANT la rarete exprès. Beaucoup de bases ne portent
+    -- aucun tag de rarete lisible : rarityRank y renvoie 0, et trier sur la
+    -- rarete d'abord enterrait les meilleures pieces sous les communes.
+    -- Le revenu, lui, est toujours affiche par le jeu.
+    -- A l'unite et pas cumule : une pile de dix pieces a $10/s ne doit pas
+    -- passer devant un seul Dragon Cannelloni.
     table.sort(order, function(a, b)
         local ta, tb = topRank(a.name), topRank(b.name)
         if ta ~= tb then return ta > tb end
+        if a.income ~= b.income then return a.income > b.income end
         local ra, rb = rarityRank(a.rarity), rarityRank(b.rarity)
         if ra ~= rb then return ra > rb end
         if a.total ~= b.total then return a.total > b.total end
@@ -973,6 +999,61 @@ function Translator.translate(text, target)
     local offline = phrasebookLookup(text, target)
     if offline then return offline, "hors-ligne" end
     return nil, info or "traduction indisponible"
+end
+
+----------------------------------------------------------------------------------
+-- MESSAGES TOUT PRETS
+--
+-- Un message par ligne dans le fichier : pas de JSON a analyser, et tu peux
+-- l'ouvrir et le corriger a la main. Si l'executor ne sait pas ecrire de
+-- fichier, les messages vivent le temps de la session et rien ne casse.
+----------------------------------------------------------------------------------
+local Presets = { file = "TradePlazaHub_messages.txt" }
+
+function Presets.load()
+    if not (Env.isfile and Env.readfile) then return end
+    local ok, exists = pcall(Env.isfile, Presets.file)
+    if not ok or not exists then return end
+    local okRead, body = pcall(Env.readfile, Presets.file)
+    if not okRead or type(body) ~= "string" then return end
+
+    local list = {}
+    for line in string.gmatch(body, "[^\r\n]+") do
+        local text = Util.trim(line)
+        if text ~= "" then list[#list + 1] = text end
+    end
+    -- un fichier vide ne doit pas effacer les messages livres par defaut
+    if #list > 0 then CONFIG.Presets = list end
+end
+
+function Presets.save()
+    if not Env.writefile then return end
+    pcall(Env.writefile, Presets.file, table.concat(CONFIG.Presets or {}, "\n"))
+end
+
+function Presets.add(text)
+    text = Util.trim(tostring(text or ""))
+    if text == "" then return false, "message vide" end
+    if #text > 180 then return false, "message trop long" end
+
+    CONFIG.Presets = CONFIG.Presets or {}
+    if #CONFIG.Presets >= 24 then return false, "24 messages au maximum" end
+    for _, existing in ipairs(CONFIG.Presets) do
+        if Util.lower(existing) == Util.lower(text) then
+            return false, "ce message est deja dans la liste"
+        end
+    end
+
+    table.insert(CONFIG.Presets, text)
+    Presets.save()
+    return true
+end
+
+function Presets.remove(index)
+    if not (CONFIG.Presets and CONFIG.Presets[index]) then return false end
+    table.remove(CONFIG.Presets, index)
+    Presets.save()
+    return true
 end
 
 ----------------------------------------------------------------------------------
@@ -1577,6 +1658,108 @@ local THEME = {
 
 UI = { pages = {}, tabs = {} }
 
+----------------------------------------------------------------------------------
+-- COULEUR DE L'INTERFACE
+--
+-- On ne reconstruit pas la fenetre : on repasse sur tout ce qui porte
+-- l'ancienne couleur d'accent et on lui donne la nouvelle. Le parcours se
+-- refait a chaque changement, donc les elements nes entre-temps (lignes de
+-- joueur, vignettes, messages) suivent aussi.
+--
+-- Les degrades ne se comparent pas comme une couleur : glowStroke et
+-- sweepBar enregistrent le leur ici pour qu'on le reconstruise.
+----------------------------------------------------------------------------------
+local Skin = { gradients = {} }
+
+local ACCENTS = {
+    { name = "Bleu",   color = Color3.fromRGB(77, 166, 255) },
+    { name = "Cyan",   color = Color3.fromRGB(34, 205, 214) },
+    { name = "Menthe", color = Color3.fromRGB(64, 214, 143) },
+    { name = "Ambre",  color = Color3.fromRGB(255, 179, 61) },
+    { name = "Orange", color = Color3.fromRGB(255, 132, 61) },
+    { name = "Rose",   color = Color3.fromRGB(255, 108, 158) },
+    { name = "Violet", color = Color3.fromRGB(167, 120, 255) },
+    { name = "Rouge",  color = Color3.fromRGB(255, 92, 106) },
+}
+
+-- version sombre d'un accent, pour les degrades et le relief
+local function deepen(c)
+    return c:Lerp(Color3.fromRGB(6, 9, 16), 0.55)
+end
+
+local SKIN_PROPS = {
+    "BackgroundColor3", "TextColor3", "ImageColor3",
+    "ScrollBarImageColor3", "PlaceholderColor3",
+}
+
+Skin.file = "TradePlazaHub_couleur.txt"
+
+function Skin.gradient(grad)
+    Skin.gradients[#Skin.gradients + 1] = grad
+    return grad
+end
+
+-- La couleur choisie tient d'un lancement a l'autre quand l'executor sait
+-- ecrire un fichier. Sinon elle vaut pour la session, comme le reste.
+function Skin.save(name)
+    if not Env.writefile then return end
+    pcall(Env.writefile, Skin.file, tostring(name))
+end
+
+function Skin.savedName()
+    if not (Env.isfile and Env.readfile) then return nil end
+    local ok, exists = pcall(Env.isfile, Skin.file)
+    if not ok or not exists then return nil end
+    local okRead, body = pcall(Env.readfile, Skin.file)
+    if not okRead or type(body) ~= "string" then return nil end
+    return string.match(body, "^%s*(.-)%s*$")
+end
+
+function Skin.sequence(a, b)
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0, a),
+        ColorSequenceKeypoint.new(0.5, b),
+        ColorSequenceKeypoint.new(1, a),
+    })
+end
+
+function Skin.apply(newAccent, root)
+    local oldA, oldB = THEME.accent, THEME.accent2
+    local newB = deepen(newAccent)
+    if newAccent == oldA or not root then return end
+
+    local ok, list = pcall(function() return root:GetDescendants() end)
+    if not ok then return end
+
+    for _, d in ipairs(list) do
+        -- les pastilles du selecteur portent les couleurs du nuancier :
+        -- les repeindre reviendrait a effacer le choix propose
+        if not d:GetAttribute("TPH_Swatch") then
+            if d:IsA("UIStroke") then
+                if d.Color == oldA then d.Color = newAccent
+                elseif d.Color == oldB then d.Color = newB end
+            else
+                for _, prop in ipairs(SKIN_PROPS) do
+                    local okp, v = pcall(function() return d[prop] end)
+                    if okp and typeof(v) == "Color3" then
+                        if v == oldA then pcall(function() d[prop] = newAccent end)
+                        elseif v == oldB then pcall(function() d[prop] = newB end) end
+                    end
+                end
+            end
+        end
+    end
+
+    for _, grad in ipairs(Skin.gradients) do
+        if grad.Parent then
+            pcall(function() grad.Color = Skin.sequence(newAccent, newB) end)
+        end
+    end
+
+    -- tout ce qui sera cree ensuite lit deja la nouvelle couleur
+    THEME.accent, THEME.accent2 = newAccent, newB
+end
+
 local function mk(class, props)
     local ok, inst = pcall(Instance.new, class)
     if not ok or not inst then inst = Instance.new("Frame") end
@@ -1632,14 +1815,9 @@ local function glowStroke(inst, thickness, transparency, speed)
         Transparency = transparency or 0,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = inst,
     })
-    local grad = mk("UIGradient", {
-        Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, THEME.accent),
-            ColorSequenceKeypoint.new(0.5, THEME.accent2),
-            ColorSequenceKeypoint.new(1, THEME.accent),
-        }),
-        Parent = st,
-    })
+    local grad = Skin.gradient(mk("UIGradient", {
+        Color = Skin.sequence(THEME.accent, THEME.accent2), Parent = st,
+    }))
     Pulse.add(function(t)
         if not grad.Parent then return false end
         grad.Rotation = (t * (speed or 28)) % 360
@@ -1654,12 +1832,8 @@ local function sweepBar(parent, height)
         Size = UDim2.new(1, 0, 0, height or 2), Position = UDim2.new(0, 0, 1, -(height or 2)),
         BackgroundColor3 = THEME.accent2, BorderSizePixel = 0, Parent = parent,
     })
-    local grad = mk("UIGradient", {
-        Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, THEME.accent),
-            ColorSequenceKeypoint.new(0.5, THEME.accent2),
-            ColorSequenceKeypoint.new(1, THEME.accent),
-        }),
+    local grad = Skin.gradient(mk("UIGradient", {
+        Color = Skin.sequence(THEME.accent, THEME.accent2),
         Transparency = NumberSequence.new({
             NumberSequenceKeypoint.new(0, 1),
             NumberSequenceKeypoint.new(0.38, 0.35),
@@ -1668,7 +1842,7 @@ local function sweepBar(parent, height)
             NumberSequenceKeypoint.new(1, 1),
         }),
         Parent = bar,
-    })
+    }))
     Pulse.add(function(t)
         if not grad.Parent then return false end
         grad.Offset = Vector2.new(((t * 0.32) % 2) - 1, 0)
@@ -1773,6 +1947,12 @@ end)
 -- trait unique : reduire la fenetre
 Icon.minus = iconMaker(function(p)
     p(6, 10, 10, 2, 1)
+end)
+
+-- croix droite : ajouter
+Icon.plus = iconMaker(function(p)
+    p(5, 10, 12, 2, 1)
+    p(10, 5, 2, 12, 1)
 end)
 
 local function pad(inst, all, top, bottom, left, right)
@@ -2242,13 +2422,26 @@ end
 
 local function btn(parent, opts)
     local style = opts.style or "ghost"
-    local base = (style == "primary" and THEME.accent)
-        or (style == "danger" and THEME.bad) or THEME.cardHi
     local textColor = (style == "primary" or style == "danger") and THEME.bg or THEME.text
+
+    -- Les couleurs sont relues a chaque survol, pas figees a la creation :
+    -- sinon un changement de couleur d'interface laissait les boutons
+    -- revenir a l'ancien accent des qu'on passait la souris dessus.
+    local function baseColor()
+        if style == "primary" then return THEME.accent end
+        if style == "danger" then return THEME.bad end
+        return THEME.cardHi
+    end
     -- au survol on eclaircit, on n'assombrit pas : l'assombrissement est
     -- reserve a l'enfoncement, plus bas.
-    local hover = (style == "primary" and Color3.fromRGB(138, 195, 255))
-        or (style == "danger" and Color3.fromRGB(255, 140, 150)) or THEME.cardHi
+    local function hoverColor()
+        if style == "primary" then
+            return THEME.accent:Lerp(Color3.fromRGB(255, 255, 255), 0.32)
+        end
+        if style == "danger" then return Color3.fromRGB(255, 140, 150) end
+        return THEME.line
+    end
+    local base = baseColor()
 
     local b = corner(mk("TextButton", {
         Size = opts.width and UDim2.new(0, opts.width, 0, opts.height or 32)
@@ -2306,14 +2499,14 @@ local function btn(parent, opts)
     end
 
     Maid.conn(b.MouseEnter:Connect(function()
-        tween(b, { BackgroundColor3 = hover }, 0.14)
+        tween(b, { BackgroundColor3 = hoverColor() }, 0.14)
         tween(halo, { Color = THEME.accent, Transparency = 0.25, Thickness = 1.8 }, 0.16)
         tween(sheen, { BackgroundTransparency = 0.5 }, 0.16)
     end))
     Maid.conn(b.MouseLeave:Connect(function()
-        tween(b, { BackgroundColor3 = base }, 0.14)
+        tween(b, { BackgroundColor3 = baseColor() }, 0.14)
         tween(halo, {
-            Color = style == "ghost" and THEME.line or base,
+            Color = style == "ghost" and THEME.line or baseColor(),
             Transparency = style == "ghost" and 0.4 or 1, Thickness = 1.4,
         }, 0.22)
         tween(sheen, { BackgroundTransparency = 0.72 }, 0.22)
@@ -2321,11 +2514,11 @@ local function btn(parent, opts)
     -- enfonce : la levre s'ecrase, le fond s'assombrit
     Maid.conn(b.MouseButton1Down:Connect(function()
         tween(lip, { Size = UDim2.new(1, 0, 0, 1) }, 0.06)
-        tween(b, { BackgroundColor3 = base:Lerp(Color3.new(0, 0, 0), 0.22) }, 0.06)
+        tween(b, { BackgroundColor3 = baseColor():Lerp(Color3.new(0, 0, 0), 0.22) }, 0.06)
     end))
     Maid.conn(b.MouseButton1Up:Connect(function()
         tween(lip, { Size = UDim2.new(1, 0, 0, 3) }, 0.12)
-        tween(b, { BackgroundColor3 = hover }, 0.12)
+        tween(b, { BackgroundColor3 = hoverColor() }, 0.12)
     end))
     Maid.conn(b.MouseButton1Click:Connect(function()
         spawnTask(function()
@@ -2883,9 +3076,68 @@ end
 refreshLangNote()
 
 local cardConv = card(pageChat)
-local chatPanel = panel(cardConv, 326)
+local chatPanel = panel(cardConv, 286)
 
 local sendReply
+
+-- Bande de messages tout prets, juste au-dessus de la saisie : un clic
+-- traduit et envoie, sans passer par le clavier.
+local presetBar = mk("Frame", {
+    Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = cardConv,
+})
+local presetScroll = mk("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 2, ScrollBarImageColor3 = THEME.accent,
+    CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.X,
+    Parent = presetBar,
+})
+do
+    local layout = listLayout(presetScroll, 6, true)
+    Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        presetScroll.CanvasSize = UDim2.new(0, layout.AbsoluteContentSize.X + 6, 0, 0)
+    end))
+end
+
+-- largeur d'une pastille : on mesure le texte au lieu de deviner, sinon les
+-- messages longs sont coupes et les courts flottent dans du vide
+local function presetWidth(text)
+    local ok, size = pcall(function()
+        return TextService:GetTextSize(text, 11, Enum.Font.GothamMedium,
+            Vector2.new(10000, 40))
+    end)
+    local w = (ok and size and size.X or (#text * 6)) + 22
+    return math.floor(Util.clamp(w, 56, 200))
+end
+
+function UI.refreshPresets()
+    clearChildren(presetScroll)
+    for _, text in ipairs(CONFIG.Presets or {}) do
+        local chip = corner(mk("TextButton", {
+            Size = UDim2.new(0, presetWidth(text), 0, 26),
+            BackgroundColor3 = THEME.cardHi, AutoButtonColor = false,
+            Font = Enum.Font.GothamMedium, Text = text, TextSize = 11,
+            TextColor3 = THEME.text, BorderSizePixel = 0,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = presetScroll,
+        }), 13)
+        local st = stroke(chip, THEME.line, 1.4, 0.3)
+        pad(chip, nil, 0, 0, 10, 10)
+
+        Maid.conn(chip.MouseEnter:Connect(function()
+            tween(chip, { BackgroundColor3 = THEME.accent }, 0.13)
+            tween(chip, { TextColor3 = THEME.bg }, 0.13)
+            tween(st, { Color = THEME.accent, Transparency = 0 }, 0.13)
+        end))
+        Maid.conn(chip.MouseLeave:Connect(function()
+            tween(chip, { BackgroundColor3 = THEME.cardHi }, 0.13)
+            tween(chip, { TextColor3 = THEME.text }, 0.13)
+            tween(st, { Color = THEME.line, Transparency = 0.3 }, 0.13)
+        end))
+        Maid.conn(chip.MouseButton1Click:Connect(function()
+            if sendReply then spawnTask(function() sendReply(text) end) end
+        end))
+    end
+end
+
 local chatField = field(cardConv, "Ecris dans ta langue...",
     function(text) if sendReply then sendReply(text) end end)
 local rowSend = rowOf(cardConv, 36)
@@ -3069,6 +3321,114 @@ listPicker(cardStyle, "Police des messages", CHAT_FONTS, "ChatFont", tostring, f
     if UI.redrawChat then UI.redrawChat() end
 end)
 
+----------------------------------------------------------------------------------
+-- Messages tout prets : on les cree ici, on les envoie depuis l'onglet Chat
+----------------------------------------------------------------------------------
+local cardPresets = card(pageSettings, "Messages tout prets")
+local presetListPanel = panel(cardPresets, 150)
+local presetInput
+
+local function refreshPresetList()
+    clearChildren(presetListPanel)
+    local list = CONFIG.Presets or {}
+    if #list == 0 then
+        textLine(presetListPanel, "aucun message enregistre", THEME.sub, Enum.Font.Gotham)
+        return
+    end
+    for index, text in ipairs(list) do
+        local row = corner(mk("Frame", {
+            Size = UDim2.new(1, -6, 0, 30), BackgroundColor3 = THEME.cardHi,
+            BorderSizePixel = 0, Parent = presetListPanel,
+        }), 8)
+        stroke(row, THEME.line, 1.4, 0.4)
+        mk("TextLabel", {
+            Size = UDim2.new(1, -44, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = text,
+            TextSize = 11, TextColor3 = THEME.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
+        })
+        local kill = corner(mk("TextButton", {
+            Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(1, -30, 0.5, -12),
+            BackgroundColor3 = THEME.surface, AutoButtonColor = false, Text = "",
+            BorderSizePixel = 0, Parent = row,
+        }), 7)
+        local killIcon = Icon.cross(kill, 12, THEME.bad)
+        killIcon.holder.Position = UDim2.new(0.5, -6, 0.5, -6)
+        Maid.conn(kill.MouseEnter:Connect(function()
+            tween(kill, { BackgroundColor3 = THEME.bad }, 0.13)
+            paintIcon(killIcon, THEME.bg, 0.13)
+        end))
+        Maid.conn(kill.MouseLeave:Connect(function()
+            tween(kill, { BackgroundColor3 = THEME.surface }, 0.13)
+            paintIcon(killIcon, THEME.bad, 0.13)
+        end))
+        Maid.conn(kill.MouseButton1Click:Connect(function()
+            Presets.remove(index)
+            refreshPresetList()
+            if UI.refreshPresets then UI.refreshPresets() end
+            setStatus("message supprime", THEME.sub)
+        end))
+    end
+end
+
+local function addPreset()
+    local ok, why = Presets.add(presetInput.Text)
+    if not ok then setStatus(tostring(why), THEME.warn) return end
+    presetInput.Text = ""
+    refreshPresetList()
+    if UI.refreshPresets then UI.refreshPresets() end
+    setStatus("message ajoute", THEME.good)
+end
+
+presetInput = field(cardPresets, "Nouveau message...", addPreset)
+btn(cardPresets, { text = "Ajouter", icon = Icon.plus, style = "primary",
+    callback = addPreset })
+refreshPresetList()
+
+----------------------------------------------------------------------------------
+-- Couleur de l'interface
+----------------------------------------------------------------------------------
+local cardTheme = card(pageSettings, "Couleur")
+do
+    local swatchRow = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = cardTheme,
+    })
+    listLayout(swatchRow, 7, true)
+
+    local dots = {}
+    local function refreshDots()
+        for _, d in ipairs(dots) do
+            local on = (d.color == THEME.accent)
+            tween(d.ring, { Transparency = on and 0 or 1, Thickness = on and 2.5 or 1 }, 0.15)
+            tween(d.button, { Size = UDim2.new(0, on and 30 or 26, 0, on and 30 or 26) }, 0.15)
+        end
+    end
+
+    for _, entry in ipairs(ACCENTS) do
+        local dot = corner(mk("TextButton", {
+            Size = UDim2.new(0, 26, 0, 26), BackgroundColor3 = entry.color,
+            AutoButtonColor = false, Text = "", BorderSizePixel = 0, Parent = swatchRow,
+        }), 15)
+        -- marquee pour que le repeinturage global epargne le nuancier
+        pcall(function() dot:SetAttribute("TPH_Swatch", true) end)
+        local ring = stroke(dot, THEME.text, 1, 1)
+
+        dots[#dots + 1] = { button = dot, ring = ring, color = entry.color }
+        Maid.conn(dot.MouseButton1Click:Connect(function()
+            Skin.apply(entry.color, window)
+            CONFIG.AccentColor = entry.name
+            Skin.save(entry.name)
+            refreshDots()
+            setStatus("couleur : " .. entry.name, THEME.good)
+        end))
+    end
+    refreshDots()
+    -- l'initialisation rappelle ce rafraichissement apres avoir repose la
+    -- couleur enregistree, sinon l'anneau reste sur la mauvaise pastille
+    UI.refreshSwatches = refreshDots
+end
+
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
@@ -3127,12 +3487,34 @@ GENV.TradePlazaHub = {
 ----------------------------------------------------------------------------------
 UI.select("Joueurs")
 
+-- Messages tout prets : le fichier remplace la liste livree par defaut. Les
+-- deux vues (les pastilles du Chat, la gestion dans Reglages) se redessinent.
+Presets.load()
+refreshPresetList()
+if UI.refreshPresets then UI.refreshPresets() end
+
+-- couleur choisie au lancement precedent
+do
+    local wanted = CONFIG.AccentColor or Skin.savedName()
+    if wanted then
+        for _, entry in ipairs(ACCENTS) do
+            if entry.name == wanted then
+                Skin.apply(entry.color, window)
+                CONFIG.AccentColor = entry.name
+                if UI.refreshSwatches then UI.refreshSwatches() end
+                break
+            end
+        end
+    end
+end
+
 -- On releve les libelles maintenant : les panneaux dynamiques sont encore
 -- vides, donc aucun pseudo de joueur ni nom de brainrot ne peut se
--- retrouver dans la liste a traduire. Le logo reste en francais.
+-- retrouver dans la liste a traduire. Le logo reste en francais, et les
+-- messages tout prets aussi : ce sont TES phrases, pas des libelles.
 I18N.scan(window, {
-    [playersPanel] = true, [brainrotPanel] = true,
-    [chatPanel] = true, [wordmark] = true,
+    [playersPanel] = true, [brainrotPanel] = true, [chatPanel] = true,
+    [presetScroll] = true, [presetListPanel] = true, [wordmark] = true,
 })
 if CONFIG.TranslateTo and CONFIG.TranslateTo ~= "fr" then
     I18N.apply(CONFIG.TranslateTo)
