@@ -95,7 +95,27 @@ local CONFIG = {
     ShowAvatars  = true,
     ShowModels   = true,
     ChatFont     = POLICE_CHAT,   -- police des messages (onglet Reglages)
-    ModelSize    = 100,         -- taille de l'apercu 3D des brainrots (px)
+    ModelSize    = 140,         -- taille de l'apercu 3D des brainrots (px)
+
+    -- Brainrots epingles en tete de la base, du meilleur au moins bon.
+    -- Le tri normal (rarete, puis revenu) ne suffit pas : deux pieces
+    -- "Secret" ne valent pas la meme chose, et c'est le nom qui tranche.
+    -- Tout ce qui est dans cette liste passe devant le reste ; le dernier
+    -- de la liste est le seuil (ici Dragon Cannelloni).
+    --
+    -- Le jeu sort de nouveaux brainrots en permanence : cette liste est un
+    -- point de depart, complete-la et reordonne-la comme tu veux. La casse,
+    -- les accents et les espaces en trop n'ont pas d'importance.
+    TopBrainrots = {
+        "garama and madundung",
+        "la grande combinasion",
+        "nuclearo dinossauro",
+        "graipuss medussi",
+        "los tralaleritos",
+        "chimpanzini spiderini",
+        "la vacca saturno saturnita",
+        "dragon cannelloni",
+    },
 
     -- decor de la base pris a tort pour un brainrot : compare en minuscules,
     -- en sous-chaine. Ajoute-en si le scanner ramene encore du mobilier.
@@ -566,6 +586,21 @@ local function rarityRank(name)
     if not name then return 0 end
     return RARITY_RANK[Util.lower(Util.trim(name))] or 0
 end
+
+-- rang des brainrots epingles (CONFIG.TopBrainrots). Le premier de la liste
+-- a le plus grand nombre, tout ce qui n'y figure pas vaut 0 et passe apres.
+local TOP_RANK = {}
+do
+    local list = CONFIG.TopBrainrots or {}
+    for i, name in ipairs(list) do
+        TOP_RANK[Util.lower(Util.trim(name))] = #list - i + 1
+    end
+end
+
+local function topRank(name)
+    if not name then return 0 end
+    return TOP_RANK[Util.lower(Util.trim(name))] or 0
+end
 local MUTATIONS = {
     "gold", "golden", "diamond", "rainbow", "lava", "bloodrot", "celestial",
     "candy", "galaxy", "nuclear", "radioactive", "ice", "fire", "crystal",
@@ -724,8 +759,11 @@ function Inspector.brainrots(plot)
         end
     end
 
-    -- les plus rares en tete, puis le meilleur revenu, puis la quantite
+    -- d'abord les brainrots epingles dans l'ordre de CONFIG.TopBrainrots,
+    -- puis les plus rares, puis le meilleur revenu, puis la quantite
     table.sort(order, function(a, b)
+        local ta, tb = topRank(a.name), topRank(b.name)
+        if ta ~= tb then return ta > tb end
         local ra, rb = rarityRank(a.rarity), rarityRank(b.rarity)
         if ra ~= rb then return ra > rb end
         if a.total ~= b.total then return a.total > b.total end
@@ -935,6 +973,82 @@ function Translator.translate(text, target)
     local offline = phrasebookLookup(text, target)
     if offline then return offline, "hors-ligne" end
     return nil, info or "traduction indisponible"
+end
+
+----------------------------------------------------------------------------------
+-- TRADUCTION DE L'INTERFACE
+--
+-- Les libelles du script sont ecrits en francais. Quand tu changes "Ma
+-- langue", ils passent par le meme traducteur que le chat.
+--
+-- Un par un, et pas en une seule requete : les trois fournisseurs Google
+-- recollent les segments bout a bout SANS separateur (voir les parse()
+-- ci-dessus), donc un envoi groupe reviendrait avec un pave impossible a
+-- redecouper. On les enchaine donc en tache de fond, avec une petite pause
+-- entre chaque pour ne pas se faire limiter. Le cache du traducteur rend
+-- tous les changements suivants instantanes.
+----------------------------------------------------------------------------------
+local I18N = { items = {}, gen = 0, source = "fr" }
+
+-- enregistre un texte fixe de l'interface, en gardant l'original francais
+function I18N.add(inst, prop)
+    prop = prop or "Text"
+    local ok, src = pcall(function() return inst[prop] end)
+    if not ok or type(src) ~= "string" or Util.trim(src) == "" then return end
+    I18N.items[#I18N.items + 1] = { inst = inst, prop = prop, src = src }
+end
+
+-- Passe une fois sur toute la fenetre. A appeler AVANT que le moindre
+-- contenu dynamique existe : un pseudo de joueur ou un nom de brainrot ne
+-- doit jamais partir au traducteur. `skip` contient les conteneurs a ignorer.
+function I18N.scan(root, skip)
+    skip = skip or {}
+    local ok, list = pcall(function() return root:GetDescendants() end)
+    if not ok then return end
+    for _, d in ipairs(list) do
+        local ignored, p = false, d
+        while p and p ~= root do
+            if skip[p] then ignored = true break end
+            p = p.Parent
+        end
+        if not ignored and not d:GetAttribute("TPH_Dynamic") then
+            if d:IsA("TextButton") or d:IsA("TextLabel") then
+                I18N.add(d, "Text")
+            elseif d:IsA("TextBox") then
+                I18N.add(d, "PlaceholderText")
+            end
+        end
+    end
+end
+
+function I18N.apply(target)
+    I18N.gen = I18N.gen + 1
+    local gen = I18N.gen
+
+    -- retour au francais : on repose les originaux, aucun appel reseau
+    if not target or target == I18N.source then
+        for _, it in ipairs(I18N.items) do
+            pcall(function() it.inst[it.prop] = it.src end)
+        end
+        return
+    end
+
+    spawnTask(function()
+        local done = {}
+        for _, it in ipairs(I18N.items) do
+            -- une autre langue a ete choisie entre-temps : on abandonne
+            if State.Unloaded or I18N.gen ~= gen then return end
+            if it.inst.Parent then
+                local out = done[it.src]
+                if out == nil then
+                    out = Translator.raw(it.src, target, I18N.source) or false
+                    done[it.src] = out
+                    waitFor(0.05)
+                end
+                if out then pcall(function() it.inst[it.prop] = out end) end
+            end
+        end
+    end)
 end
 
 ----------------------------------------------------------------------------------
@@ -1453,8 +1567,8 @@ local THEME = {
     text    = Color3.fromRGB(232, 237, 247),
     sub     = Color3.fromRGB(122, 135, 166),
     dim     = Color3.fromRGB(93, 106, 135),  -- texte d'origine sous la traduction
-    accent  = Color3.fromRGB(255, 179, 61),  -- ambre : l'accent principal
-    accent2 = Color3.fromRGB(199, 127, 20),  -- ambre profond : degrades et relief
+    accent  = Color3.fromRGB(77, 166, 255),  -- bleu : l'accent principal
+    accent2 = Color3.fromRGB(32, 96, 176),   -- bleu profond : degrades et relief
     good    = Color3.fromRGB(79, 224, 168),  -- menthe : en ligne / reussite
     warn    = Color3.fromRGB(255, 190, 92),
     bad     = Color3.fromRGB(255, 107, 122), -- rose : supprimer / erreur
@@ -1479,6 +1593,15 @@ end
 
 local function corner(inst, r)
     mk("UICorner", { CornerRadius = UDim.new(0, r or 8), Parent = inst })
+    return inst
+end
+
+-- Marque un texte dont le contenu change en cours de route (valeur d'un
+-- selecteur, resume d'une base, position d'un curseur). Le traducteur
+-- d'interface ne doit pas y toucher : il repousserait l'ancienne valeur
+-- traduite par-dessus la nouvelle.
+local function dynamic(inst)
+    pcall(function() inst:SetAttribute("TPH_Dynamic", true) end)
     return inst
 end
 
@@ -1837,7 +1960,7 @@ local window = corner(mk("Frame", {
     BackgroundColor3 = THEME.card, BorderSizePixel = 0,
     ClipsDescendants = true, Parent = screen,
 }), 16)
-glowStroke(window, 1.5, 0.35, 20)
+glowStroke(window, 3.5, 0.1, 20)
 
 local titleBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, BAR_H), BackgroundColor3 = THEME.cardHi,
@@ -1871,7 +1994,7 @@ end
 
 -- Michroma existe dans Roblox : c'est ce qui donne au titre son air de
 -- terminal, sans avoir a le composer en majuscules espacees a la main.
-mk("TextLabel", {
+local wordmark = mk("TextLabel", {
     Size = UDim2.new(0, 130, 1, 0), Position = UDim2.new(0, 34, 0, 0),
     BackgroundTransparency = 1, Font = Enum.Font.Michroma,
     Text = "TRADE PLAZA", TextSize = 11, TextColor3 = THEME.text,
@@ -1926,7 +2049,7 @@ local tabBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, TABS_H), Position = UDim2.new(0, 0, 1, -(TABS_H + STAT_H)),
     BackgroundColor3 = THEME.surface, BorderSizePixel = 0, Parent = window,
 })
-stroke(tabBar, THEME.line, 1, 0.55)
+stroke(tabBar, THEME.line, 1.6, 0.4)
 listLayout(tabBar, 0, true)
 
 local statusBar = mk("Frame", {
@@ -1942,17 +2065,33 @@ Pulse.add(function(t)
     statusDot.BackgroundTransparency = 0.15 * (0.5 + 0.5 * math.sin(t * 3.1))
     return true
 end)
-local statusText = mk("TextLabel", {
+local statusText = dynamic(mk("TextLabel", {
     Size = UDim2.new(1, -34, 1, 0), Position = UDim2.new(0, 26, 0, 0),
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = "initialisation...",
     TextSize = 10, TextColor3 = THEME.sub, TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd, Parent = statusBar,
-})
+}))
 
+-- Le message de statut est ecrit en francais puis traduit en tache de fond.
+-- Le jeton evite qu'une traduction lente vienne ecraser un statut plus
+-- recent arrive entre-temps.
+local statusToken = 0
 local function setStatus(text, color)
-    statusText.Text = tostring(text)
+    text = tostring(text)
+    statusToken = statusToken + 1
+    local mine = statusToken
+    statusText.Text = text
     tween(statusText, { TextColor3 = color or THEME.sub }, 0.2)
     tween(statusDot, { BackgroundColor3 = color or THEME.sub }, 0.2)
+
+    if CONFIG.TranslateTo and CONFIG.TranslateTo ~= "fr" then
+        spawnTask(function()
+            local out = Translator.raw(text, CONFIG.TranslateTo, "fr")
+            if out and statusToken == mine and not State.Unloaded then
+                statusText.Text = out
+            end
+        end)
+    end
 end
 
 do
@@ -2056,7 +2195,7 @@ local function card(page, title, subtitle)
         Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
         BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = page,
     }), 12)
-    stroke(holder, THEME.line, 1, 0.35)
+    stroke(holder, THEME.line, 1.8, 0.2)
     topLight(holder, 0.93)
     pad(holder, 14)
     listLayout(holder, 8)
@@ -2108,7 +2247,7 @@ local function btn(parent, opts)
     local textColor = (style == "primary" or style == "danger") and THEME.bg or THEME.text
     -- au survol on eclaircit, on n'assombrit pas : l'assombrissement est
     -- reserve a l'enfoncement, plus bas.
-    local hover = (style == "primary" and Color3.fromRGB(255, 201, 112))
+    local hover = (style == "primary" and Color3.fromRGB(138, 195, 255))
         or (style == "danger" and Color3.fromRGB(255, 140, 150)) or THEME.cardHi
 
     local b = corner(mk("TextButton", {
@@ -2205,7 +2344,7 @@ local function field(parent, placeholder, onEnter, width)
         TextSize = 12, TextColor3 = THEME.text, ClearTextOnFocus = false,
         TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0, Parent = parent,
     }), 8)
-    local st = stroke(box, THEME.line, 1, 0.2)
+    local st = stroke(box, THEME.line, 1.6, 0.1)
     pad(box, nil, 0, 0, 10, 10)
     Maid.conn(box.Focused:Connect(function()
         tween(st, { Color = THEME.accent, Transparency = 0 }, 0.15)
@@ -2257,12 +2396,12 @@ local function slider(parent, text, key, minVal, maxVal, suffix, onChange)
         Font = Enum.Font.Gotham, Text = text, TextSize = 11, TextColor3 = THEME.sub,
         TextXAlignment = Enum.TextXAlignment.Left, Parent = holder,
     })
-    local valueLabel = mk("TextLabel", {
+    local valueLabel = dynamic(mk("TextLabel", {
         Size = UDim2.new(0, 96, 0, 16), Position = UDim2.new(1, -96, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = tostring(CONFIG[key]) .. (suffix or ""), TextSize = 11,
         TextColor3 = THEME.accent, TextXAlignment = Enum.TextXAlignment.Right, Parent = holder,
-    })
+    }))
     local bar = corner(mk("Frame", {
         Size = UDim2.new(1, 0, 0, 8), Position = UDim2.new(0, 0, 0, 26),
         BackgroundColor3 = THEME.surface, BorderSizePixel = 0, Parent = holder,
@@ -2332,25 +2471,31 @@ local function panel(parent, height)
     return scroll
 end
 
--- meme chose, mais les elements se suivent HORIZONTALEMENT et le panneau
--- defile de gauche a droite. Retourne le scroll et son cadre, pour pouvoir
--- ajuster la hauteur selon la taille des vignettes.
-local function hpanel(parent, height)
+-- Panneau en grille : les vignettes se rangent en colonnes et le panneau
+-- defile vers le bas. En portrait c'est ce qui permet d'en voir plusieurs
+-- d'un coup, la ou un defilement horizontal n'en montrait que deux.
+-- Retourne le scroll, son cadre et la grille (pour regler la taille des
+-- cellules selon la taille d'apercu choisie).
+local function gridPanel(parent, height)
     local holder = corner(mk("Frame", {
-        Size = UDim2.new(1, 0, 0, height or 180), BackgroundColor3 = THEME.surface,
+        Size = UDim2.new(1, 0, 0, height or 300), BackgroundColor3 = THEME.surface,
         BorderSizePixel = 0, Parent = parent,
     }), 8)
     local scroll = mk("ScrollingFrame", {
         Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
-        ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(),
-        ScrollingDirection = Enum.ScrollingDirection.X, Parent = holder,
+        ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(), Parent = holder,
     })
-    local layout = listLayout(scroll, 8, true)
-    Maid.conn(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        scroll.CanvasSize = UDim2.new(0, layout.AbsoluteContentSize.X + 10, 0, 0)
+    local grid = mk("UIGridLayout", {
+        CellPadding = UDim2.new(0, 8, 0, 8),
+        CellSize = UDim2.new(0, 156, 0, 204),
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        SortOrder = Enum.SortOrder.LayoutOrder, Parent = scroll,
+    })
+    Maid.conn(grid:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroll.CanvasSize = UDim2.new(0, 0, 0, grid.AbsoluteContentSize.Y + 8)
     end))
-    return scroll, holder
+    return scroll, holder, grid
 end
 
 local function textLine(scroll, text, color, font)
@@ -2362,9 +2507,11 @@ local function textLine(scroll, text, color, font)
     })
 end
 
+-- On ne detruit que les elements visibles : les UIListLayout, UIGridLayout,
+-- UIPadding et consorts doivent survivre au vidage du panneau.
 local function clearChildren(scroll)
     for _, child in ipairs(scroll:GetChildren()) do
-        if not child:IsA("UIListLayout") then child:Destroy() end
+        if child:IsA("GuiObject") then child:Destroy() end
     end
 end
 
@@ -2389,7 +2536,7 @@ local function listPicker(parent, title, values, key, labelFn, onPick)
         Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = THEME.surface,
         AutoButtonColor = false, Text = "", BorderSizePixel = 0, Parent = holder,
     }), 8)
-    stroke(head, THEME.line, 1, 0.3)
+    stroke(head, THEME.line, 1.6, 0.2)
     mk("TextLabel", {
         Size = UDim2.new(0.55, -12, 1, 0), Position = UDim2.new(0, 12, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = title,
@@ -2397,13 +2544,13 @@ local function listPicker(parent, title, values, key, labelFn, onPick)
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
     })
-    local current = mk("TextLabel", {
+    local current = dynamic(mk("TextLabel", {
         Size = UDim2.new(0.45, -34, 1, 0), Position = UDim2.new(0.55, 0, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = labelFn(CONFIG[key]), TextSize = 12, TextColor3 = THEME.accent,
         TextXAlignment = Enum.TextXAlignment.Right,
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
-    })
+    }))
     local arrow = mk("TextLabel", {
         Size = UDim2.new(0, 22, 1, 0), Position = UDim2.new(1, -24, 0, 0),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "+",
@@ -2414,7 +2561,7 @@ local function listPicker(parent, title, values, key, labelFn, onPick)
         Size = UDim2.new(1, 0, 0, 152), BackgroundColor3 = THEME.bg,
         BorderSizePixel = 0, Visible = false, Parent = holder,
     }), 8)
-    stroke(listHolder, THEME.line, 1, 0.4)
+    stroke(listHolder, THEME.line, 1.6, 0.3)
     local scroll = mk("ScrollingFrame", {
         Size = UDim2.new(1, -8, 1, -8), Position = UDim2.new(0, 4, 0, 4),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
@@ -2489,15 +2636,15 @@ btn(cardList, { text = "Rafraichir la liste", icon = Icon.sync, callback = funct
 end })
 
 local cardBase = card(pagePlayers)
-local baseSummary = note(cardBase, "", THEME.text)
-local brainrotPanel, brainrotHolder = hpanel(cardBase, 190)
+local baseSummary = dynamic(note(cardBase, "", THEME.text))
+local brainrotPanel, _, brainrotGrid = gridPanel(cardBase, 330)
 
 local function playerRow(scroll, plr)
     local row = corner(mk("Frame", {
         Size = UDim2.new(1, -6, 0, 52), BackgroundColor3 = THEME.cardHi,
         BorderSizePixel = 0, Parent = scroll,
     }), 11)
-    stroke(row, THEME.line, 1, 0.5)
+    stroke(row, THEME.line, 1.6, 0.35)
 
     local head = avatar(row, plr.UserId, 34)
     head.Position = UDim2.new(0, 9, 0.5, -17)
@@ -2636,8 +2783,12 @@ scanBase = function(player, model, ownerName)
     end
     State.Plot, State.PlotOwner = plot, ownerName
     clearChildren(brainrotPanel)
-    brainrotHolder.Size = UDim2.new(1, 0, 0,
-        math.floor(Util.clamp(CONFIG.ModelSize, 48, 260)) + 84)
+
+    -- La cellule fait exactement la taille d'une vignette : le nombre de
+    -- colonnes tombe tout seul de la largeur disponible, et la grille reste
+    -- centree quand la derniere rangee est incomplete.
+    local size = math.floor(Util.clamp(CONFIG.ModelSize, 48, 260))
+    brainrotGrid.CellSize = UDim2.new(0, size + 16, 0, size + 64)
 
     local list, total, count = Inspector.brainrots(plot)
     baseSummary.Text = string.format(
@@ -2676,32 +2827,44 @@ local langStrip = corner(mk("Frame", {
     Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = THEME.surface,
     BorderSizePixel = 0, Parent = pageChat,
 }), 10)
-stroke(langStrip, THEME.line, 1, 0.45)
+stroke(langStrip, THEME.line, 1.6, 0.3)
 
-local detectFrom = mk("TextLabel", {
-    Size = UDim2.new(0, 96, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+-- Le libelle fixe et la valeur sont deux etiquettes distinctes : le libelle
+-- se fait traduire avec le reste de l'interface, la valeur est un nom de
+-- langue qu'on reecrit a chaque message et qui doit rester intact.
+mk("TextLabel", {
+    Size = UDim2.new(0, 130, 0, 11), Position = UDim2.new(0, 12, 0, 7),
+    BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "IL PARLE",
+    TextSize = 8, TextColor3 = THEME.sub,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = langStrip,
+})
+local detectFrom = dynamic(mk("TextLabel", {
+    Size = UDim2.new(0, 130, 0, 14), Position = UDim2.new(0, 12, 0, 19),
     BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "-",
-    TextSize = 11, TextColor3 = THEME.good,
+    TextSize = 12, TextColor3 = THEME.sub,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd, Parent = langStrip,
+}))
+
+mk("TextLabel", {
+    Size = UDim2.new(0, 150, 0, 11), Position = UDim2.new(1, -162, 0, 7),
+    BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "TU REPONDS EN",
+    TextSize = 8, TextColor3 = THEME.sub,
+    TextXAlignment = Enum.TextXAlignment.Right, Parent = langStrip,
 })
-mk("Frame", {
-    Size = UDim2.new(0, 40, 0, 1), Position = UDim2.new(0, 114, 0.5, 0),
-    BackgroundColor3 = THEME.line, BorderSizePixel = 0, Parent = langStrip,
-})
-local detectTo = mk("TextLabel", {
-    Size = UDim2.new(0, 140, 1, 0), Position = UDim2.new(1, -152, 0, 0),
+local detectTo = dynamic(mk("TextLabel", {
+    Size = UDim2.new(0, 150, 0, 14), Position = UDim2.new(1, -162, 0, 19),
     BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "-",
-    TextSize = 11, TextColor3 = THEME.accent,
+    TextSize = 12, TextColor3 = THEME.accent,
     TextXAlignment = Enum.TextXAlignment.Right,
     TextTruncate = Enum.TextTruncate.AtEnd, Parent = langStrip,
-})
+}))
 
 refreshLangNote = function()
     local lang = Chat.replyLang()
-    detectFrom.Text = State.LastDetected and langName(State.LastDetected) or "en attente"
+    detectFrom.Text = State.LastDetected and langName(State.LastDetected) or "?"
     detectFrom.TextColor3 = State.LastDetected and THEME.good or THEME.sub
-    detectTo.Text = "tu reponds en " .. langName(lang)
+    detectTo.Text = langName(lang)
 end
 
 -- appele par le traducteur des qu'un fournisseur nous rend la langue source
@@ -2891,9 +3054,11 @@ local pageSettings = addTab("Reglages", Icon.tune)
 -- Les deux langues vivent ici, pas dans le Chat : on les choisit une fois,
 -- alors qu'on lit le bandeau de langue a chaque message.
 local cardLang = card(pageSettings, "Langues")
-listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function()
+listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function(value)
     refreshLangNote()
     if UI.redrawChat then UI.redrawChat() end
+    -- tout le script bascule dans la langue choisie
+    I18N.apply(value)
 end)
 listPicker(cardLang, "Repli si rien n'est detecte", LANGS, "SendAs", langName, function()
     refreshLangNote()
@@ -2961,6 +3126,17 @@ GENV.TradePlazaHub = {
 -- INITIALISATION
 ----------------------------------------------------------------------------------
 UI.select("Joueurs")
+
+-- On releve les libelles maintenant : les panneaux dynamiques sont encore
+-- vides, donc aucun pseudo de joueur ni nom de brainrot ne peut se
+-- retrouver dans la liste a traduire. Le logo reste en francais.
+I18N.scan(window, {
+    [playersPanel] = true, [brainrotPanel] = true,
+    [chatPanel] = true, [wordmark] = true,
+})
+if CONFIG.TranslateTo and CONFIG.TranslateTo ~= "fr" then
+    I18N.apply(CONFIG.TranslateTo)
+end
 
 window.Size = UDim2.new(0, WIN_W - 30, 0, WIN_H - 52)
 tween(window, { Size = UDim2.new(0, WIN_W, 0, WIN_H) }, 0.3, Enum.EasingStyle.Back)
