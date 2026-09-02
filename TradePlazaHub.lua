@@ -1482,6 +1482,13 @@ local function stroke(inst, color, thickness, transparency)
     })
 end
 
+-- 3D depth effect: layered strokes for 3D appearance
+local function depth3D(inst, baseColor, glowColor)
+    local s1 = stroke(inst, baseColor or THEME.line, 0.8, 0.4)
+    local s2 = stroke(inst, glowColor or THEME.accent2, 0.4, 0.7)
+    return s1, s2
+end
+
 -- contour degrade violet -> turquoise qui tourne lentement
 local function glowStroke(inst, thickness, transparency, speed)
     local st = mk("UIStroke", {
@@ -1949,6 +1956,7 @@ local function card(page, title, subtitle)
         BackgroundColor3 = THEME.card, BorderSizePixel = 0, Parent = page,
     }), 12)
     stroke(holder, THEME.line, 1, 0.35)
+    depth3D(holder, THEME.line, THEME.accent2)
     pad(holder, 14)
     listLayout(holder, 8)
 
@@ -2356,19 +2364,19 @@ local scanBase, refreshPlayers
 ----------------------------------------------------------------------------------
 -- ONGLET : JOUEURS  (la liste, et la base du joueur choisi juste en dessous)
 ----------------------------------------------------------------------------------
-local pagePlayers = addTab("Joueurs", "\240\159\145\165")
+local pagePlayers = addTab("Joueurs", "◆┃◆")
 
 local colPlayersL, colPlayersR = split(pagePlayers, 268, 0.38)
 
-local cardList = card(colPlayersL, "Joueurs du serveur")
+local cardList = card(colPlayersL)
 local playersPanel = panel(cardList, 158)
-btn(cardList, { text = "Rafraichir", icon = "\226\159\179", callback = function()
+btn(cardList, { text = "Rafraichir", icon = "◁▣▷", callback = function()
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
 end })
 
 local cardBase = card(colPlayersR, "Base")
-local baseSummary = note(cardBase, "choisis un joueur pour voir ses brainrots", THEME.text)
+local baseSummary = note(cardBase, "", THEME.text)
 local brainrotPanel, brainrotHolder = hpanel(cardBase, 190)
 
 local function playerRow(scroll, plr)
@@ -2396,7 +2404,7 @@ local function playerRow(scroll, plr)
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local see = btn(row, { text = "BASE", icon = "\240\159\148\141", width = 92,
+    local see = btn(row, { text = "BASE", icon = "┏◈┓", width = 92,
         height = 30, style = "primary", callback = function() scanBase(plr) end })
     see.Position = UDim2.new(1, -100, 0.5, -15)
     return row
@@ -2543,14 +2551,13 @@ end
 ----------------------------------------------------------------------------------
 -- ONGLET : CHAT
 ----------------------------------------------------------------------------------
-local pageChat = addTab("Chat", "\240\159\146\172")
+local pageChat = addTab("Chat", "┌◇┐")
 
 local colChatL, colChatR = split(pageChat, 268, 0.58)
 
 local refreshLangNote
 
-local cardLang = card(colChatR, "Langues",
-    "coche ta langue : tout ce que tu lis arrive dedans")
+local cardLang = card(colChatR)
 listPicker(cardLang, "Ma langue", LANGS, "TranslateTo", langName, function()
     refreshLangNote()
     if UI.redrawChat then UI.redrawChat() end
@@ -2559,14 +2566,12 @@ listPicker(cardLang, "Repli si rien n'est detecte", LANGS, "SendAs", langName, f
     refreshLangNote()
 end)
 
-local detectNote = note(cardLang, "langue detectee : en attente d'un message", THEME.accent2)
+local detectNote = note(cardLang, "", THEME.accent2)
 
 refreshLangNote = function()
     local lang, fromDetection = Chat.replyLang()
-    detectNote.Text = "langue detectee : "
-        .. (State.LastDetected and langName(State.LastDetected) or "en attente")
-        .. "     ->     ta reponse partira en " .. langName(lang)
-        .. (fromDetection and " (detecte)" or " (repli)")
+    detectNote.Text = (State.LastDetected and langName(State.LastDetected) or "-")
+        .. " → " .. langName(lang)
 end
 
 -- appele par le traducteur des qu'un fournisseur nous rend la langue source
@@ -2584,11 +2589,11 @@ end
 
 refreshLangNote()
 
-local cardConv = card(colChatL, "Conversation")
+local cardConv = card(colChatL)
 local chatPanel = panel(cardConv, 120)
 
 local sendReply
-local chatField = field(cardConv, "ecris dans ta langue...   (Entree pour envoyer)",
+local chatField = field(cardConv, "Écris...",
     function(text) if sendReply then sendReply(text) end end)
 local rowSend = rowOf(cardConv, 36)
 
@@ -2612,9 +2617,9 @@ sendReply = function(text)
     end
 end
 
-btn(rowSend, { text = "ENVOYER", icon = "\240\159\154\128", width = 150, height = 36,
+btn(rowSend, { text = "ENVOYER", icon = "▲┃▲", width = 150, height = 36,
     style = "primary", callback = function() sendReply(chatField.Text) end })
-btn(rowSend, { text = "Effacer", icon = "\226\156\150", width = 118, height = 36,
+btn(rowSend, { text = "Effacer", icon = "╳", width = 118, height = 36,
     callback = function()
         chatField.Text = ""
         State.ChatLog = {}
@@ -2731,21 +2736,19 @@ end
 ----------------------------------------------------------------------------------
 -- ONGLET : REGLAGES
 ----------------------------------------------------------------------------------
-local pageSettings = addTab("Reglages", "\226\154\153")
+local pageSettings = addTab("Reglages", "✦┆✦")
 
-local cardStyle = card(pageSettings, "Style du chat",
-    "police des messages de la conversation")
+local cardStyle = card(pageSettings)
 listPicker(cardStyle, "Police", CHAT_FONTS, "ChatFont", tostring, function()
     if UI.redrawChat then UI.redrawChat() end
 end)
 
-local cardDisplay = card(pageSettings, "Affichage")
+local cardDisplay = card(pageSettings)
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
 slider(cardDisplay, "Taille de l'apercu 3D", "ModelSize", 48, 220, " px", function()
     redrawBase()
 end)
-note(cardDisplay, "La taille s'applique au relachement du curseur : la base affichee est redessinee toute seule.", THEME.sub)
 
 ----------------------------------------------------------------------------------
 -- BOUTONS FENETRE / RACCOURCI / UNLOAD
