@@ -1948,7 +1948,7 @@ function UI.select(name)
         page.Visible = active
         local t = UI.tabs[tabName]
         tween(t.button, { BackgroundTransparency = active and 0 or 1 }, 0.16)
-        tween(t.label, { TextColor3 = active and THEME.text or THEME.sub }, 0.16)
+        tween(t.label, { TextColor3 = active and THEME.accent2 or THEME.sub }, 0.16)
         tween(t.mark, { Size = UDim2.new(0, 3, 0, active and 20 or 0) }, 0.18)
         tween(t.glow, { Transparency = active and 0.25 or 1 }, 0.2)
         tween(t.icon, { TextColor3 = active and THEME.accent2 or THEME.sub }, 0.16)
