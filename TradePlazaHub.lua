@@ -157,6 +157,11 @@ local CONFIG = {
     -- false si des brainrots legitimes manquent a l'appel.
     RequireIncome = true,
 
+    -- Brainrots exiges : coche-en dans Reglages et la liste des joueurs ne
+    -- garde que ceux qui en possedent au moins un. Vide = personne n'est
+    -- exclu. Les noms sont compares comme dans le catalogue.
+    Wanted = {},
+
     -- Rayon de lecture au Trade Plaza (en studs). Cette carte n'a pas de
     -- conteneur "Plots" : les brainrots sont poses autour du joueur, donc on
     -- lit ce qui se trouve dans ce rayon autour de lui. Monte-le si son
@@ -1128,24 +1133,40 @@ end
 -- Decor et PNJ a ne jamais compter : une abeille du jeu, un vendeur ou un
 -- presentoir de boutique portent eux aussi un Humanoid, et se retrouvaient
 -- dans la base des joueurs.
-local looksLikeDecor
+local looksLikeDecor, insideDecorArea
 do
-    -- Les noms exacts du jeu viennent du scanner de Player Finder, qui
-    -- lit la meme carte : ce sont les enfants d'un plot qui ne sont pas
-    -- des brainrots.
-    local NOT_BRAINROT = {
-        "plotsign", "animalpodiums", "conveyor", "decorations", "purchases",
-        "friendpanel", "unlock", "laser", "walls", "floor", "skin", "cash",
-        "shop", "boutique", "display", "presentoir", "preview", "apercu",
-        "index", "catalog", "catalogue", "showcase", "vitrine", "npc", "vendor",
-        "seller", "merchant", "marchand", "leaderboard", "classement", "spawn",
-        "bee", "abeille", "bird", "oiseau", "butterfly", "papillon",
+    -- Noms EXACTS des enfants d'un plot qui ne sont pas des brainrots.
+    -- Comparaison exacte et non par sous-chaine : "bee" en sous-chaine
+    -- rejetait "Bee Loco", qui est une vraie piece Mythic.
+    local STRUCTURE = {
+        ["base"] = true, ["plotsign"] = true, ["spawn"] = true,
+        ["cash"] = true, ["laser"] = true, ["decorations"] = true,
+        ["skin"] = true, ["unlock"] = true, ["purchases"] = true,
+        ["friendpanel"] = true, ["animalpodiums"] = true,
+        ["conveyor"] = true, ["walls"] = true, ["floor"] = true,
+        ["podium"] = true, ["hitbox"] = true,
     }
+
+    -- Zones qu'on ne lit jamais, testees sur les PARENTS. Reserve au scan
+    -- de proximite : dans une base on est deja au bon endroit.
+    local AREAS = {
+        "shop", "boutique", "display", "presentoir", "preview",
+        "index", "catalog", "showcase", "vitrine", "npc", "vendor",
+        "seller", "merchant", "leaderboard",
+    }
+
+    -- On ne juge QUE le nom du modele lui-meme. Remonter dans les parents
+    -- rejetait tout ce qui est range dans "AnimalPodiums", c'est-a-dire
+    -- absolument toutes les pieces posees.
     looksLikeDecor = function(model)
-        local node, depth = model, 0
-        while node and node ~= workspace and depth < 5 do
+        return STRUCTURE[Util.lower(model.Name)] == true
+    end
+
+    insideDecorArea = function(model)
+        local node, depth = model.Parent, 0
+        while node and node ~= workspace and depth < 4 do
             local n = Util.lower(node.Name)
-            for _, bad in ipairs(NOT_BRAINROT) do
+            for _, bad in ipairs(AREAS) do
                 if string.find(n, bad, 1, true) then return true end
             end
             node, depth = node.Parent, depth + 1
@@ -1154,12 +1175,16 @@ do
     end
 end
 
-local function isEntityModel(model)
+-- `strict` = on fouille le monde ouvert (Trade Plaza), il faut des preuves.
+-- Sans lui on est deja DANS AnimalPodiums, donc le conteneur fait foi et un
+-- Humanoid suffit : c'est ce qui rend les apercus 3D a nouveau visibles.
+local function isEntityModel(model, strict)
     if not model:IsA("Model") then return false end
     if looksLikeDecor(model) then return false end
+    if Players:GetPlayerFromCharacter(model) then return false end
+    if strict and insideDecorArea(model) then return false end
 
-    -- Le signal fort : une pancarte qui annonce un revenu. Dans ce jeu,
-    -- tout brainrot pose affiche son $/s ; une abeille ou un vendeur non.
+    -- une pancarte qui annonce un revenu : la meilleure preuve
     for _, d in ipairs(model:GetChildren()) do
         if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
             for _, t in ipairs(guiTexts(d)) do
@@ -1170,12 +1195,16 @@ local function isEntityModel(model)
         end
     end
 
-    -- Sinon, il faut etre range dans un conteneur qui dit ce qu'on est.
-    -- Un Humanoid seul ne suffit plus : c'est ce qui laissait passer les
-    -- abeilles et les PNJ.
+    -- un nom connu du catalogue vaut preuve aussi
+    if catalogOf(model.Name) then return true end
+
     local parentName = Util.lower(model.Parent and model.Parent.Name or "")
     if parentName == "purchases" or parentName == "animals" or parentName == "pets"
     or parentName == "brainrots" or parentName == "items" then return true end
+
+    -- hors mode strict, un Humanoid suffit : on est dans le dossier des
+    -- pieces, pas dans le monde ouvert
+    if not strict and model:FindFirstChildWhichIsA("Humanoid") then return true end
 
     return false
 end
@@ -1212,17 +1241,19 @@ end
 
 -- Regroupe une liste de modeles en vignettes : comptage, revenus, tri.
 -- Partage par le scan d'une base et par celui du Trade Plaza.
-function Inspector.group(chosen)
+function Inspector.group(chosen, strict)
     local buckets, order, total, kept = {}, {}, 0, 0
     for _, model in ipairs(chosen) do
         local info = readEntity(model)
 
-        -- Derniere barriere : une piece qui n'affiche aucun revenu ET que le
-        -- catalogue ne connait pas n'est pas un brainrot. C'est ce qui
-        -- laissait passer les abeilles du jeu et les PNJ, affiches avec un
-        -- revenu et une rarete a "-".
-        local known = catalogOf(info.name) ~= nil
-        local real = known or info.income > 0 or CONFIG.RequireIncome == false
+        -- Barriere reservee au scan de proximite : dans le monde ouvert une
+        -- piece sans revenu affiche ET inconnue du catalogue est du decor.
+        -- Dans AnimalPodiums on ne filtre pas : le conteneur fait foi, et
+        -- filtrer la vidait completement la base.
+        local real = true
+        if strict and CONFIG.RequireIncome ~= false then
+            real = (catalogOf(info.name) ~= nil) or info.income > 0
+        end
 
         if real and not Inspector.isIgnored(info.name) then
             kept = kept + 1
@@ -1280,7 +1311,7 @@ function Inspector.brainrots(plot)
     local podiums = plot:FindFirstChild("AnimalPodiums")
     if podiums then
         for _, podium in ipairs(podiums:GetDescendants()) do
-            if podium:IsA("Model") and isEntityModel(podium) then
+            if podium:IsA("Model") and isEntityModel(podium, false) then
                 candidates[podium] = true
             end
         end
@@ -1292,11 +1323,11 @@ function Inspector.brainrots(plot)
         local ok, list = pcall(function() return plot:GetDescendants() end)
         if not ok then return {}, 0, 0 end
         for _, d in ipairs(list) do
-            if d:IsA("Model") and isEntityModel(d) then candidates[d] = true end
+            if d:IsA("Model") and isEntityModel(d, false) then candidates[d] = true end
         end
     end
 
-    return Inspector.group(outermost(candidates, plot))
+    return Inspector.group(outermost(candidates, plot), false)
 end
 
 -- Trade Plaza : il n'y a pas de conteneur "Plots" dans cette carte, donc
@@ -1323,7 +1354,7 @@ function Inspector.nearPlayer(player, radius)
 
     local candidates = {}
     for _, d in ipairs(list) do
-        if d:IsA("Model") and not chars[d] and isEntityModel(d) then
+        if d:IsA("Model") and not chars[d] and isEntityModel(d, true) then
             local inChar, parent = false, d.Parent
             while parent and parent ~= workspace do
                 if chars[parent] then inChar = true break end
@@ -1337,7 +1368,7 @@ function Inspector.nearPlayer(player, radius)
             end
         end
     end
-    return Inspector.group(outermost(candidates, workspace))
+    return Inspector.group(outermost(candidates, workspace), true)
 end
 
 function Inspector.dump(plot, maxLines)
@@ -1612,6 +1643,49 @@ function Marks.clearHidden()
     saveIds(Marks.fileHidden, CONFIG.Hidden)
 end
 
+-- BRAINROTS EXIGES
+--
+-- La verification demande de scanner la base de chaque joueur, ce qui est
+-- lourd : le resultat est donc garde en cache et rafraichi par la liste,
+-- pas recalcule a chaque redessin.
+Marks.fileWanted = "TradePlazaHub_exiges.txt"
+Marks.owns = {}          -- [userId] = true/false, resultat du dernier scan
+
+function Marks.wantedCount()
+    local n = 0
+    for _ in pairs(CONFIG.Wanted or {}) do n = n + 1 end
+    return n
+end
+
+function Marks.isWanted(key) return CONFIG.Wanted and CONFIG.Wanted[key] == true end
+
+function Marks.setWanted(key, on)
+    CONFIG.Wanted = CONFIG.Wanted or {}
+    CONFIG.Wanted[key] = on and true or nil
+    Marks.owns = {}   -- le filtre a change, les verdicts ne valent plus rien
+    if Env.writefile then
+        local list = {}
+        for k in pairs(CONFIG.Wanted) do list[#list + 1] = k end
+        table.sort(list)
+        pcall(Env.writefile, Marks.fileWanted, table.concat(list, "\n"))
+    end
+end
+
+function Marks.loadWanted()
+    if not (Env.isfile and Env.readfile) then return end
+    local ok, exists = pcall(Env.isfile, Marks.fileWanted)
+    if not ok or not exists then return end
+    local okRead, body = pcall(Env.readfile, Marks.fileWanted)
+    if not okRead or type(body) ~= "string" then return end
+
+    local set = {}
+    for line in string.gmatch(body, "[^\r\n]+") do
+        local k = Util.trim(line)
+        if k ~= "" then set[k] = true end
+    end
+    CONFIG.Wanted = set
+end
+
 function Marks.countHidden()
     local n = 0
     for _ in pairs(CONFIG.Hidden or {}) do n = n + 1 end
@@ -1827,6 +1901,24 @@ function Trade.viaRemote(player)
     return true, "invitation envoyee"
 end
 
+-- Demande d'ami Roblox. Rien a voir avec un remote du jeu : c'est une API
+-- du client, elle ne peut pas faire kick, et elle marche partout.
+function Trade.addFriend(player)
+    if not player then return false, "joueur introuvable" end
+    if player == LocalPlayer then return false, "c'est toi" end
+
+    -- RequestFriendship part sans confirmation ; la fenetre de Roblox
+    -- prend le relais quand l'API est bloquee cote client.
+    local ok = pcall(function() LocalPlayer:RequestFriendship(player) end)
+    if not ok then
+        ok = pcall(function()
+            StarterGui:SetCore("PromptSendFriendRequest", player)
+        end)
+    end
+    if not ok then return false, "demande d'ami refusee" end
+    return true, "demande d'ami envoyee a " .. player.Name
+end
+
 function Trade.send(player)
     if not player then return false, "joueur introuvable" end
     if CONFIG.AllowTrade == false then
@@ -1903,6 +1995,71 @@ end
 
 function Movement.stop()
     Movement.token = Movement.token + 1
+end
+
+-- MARCHE vers un point, par le chemin que le jeu calcule lui-meme.
+--
+-- Rien a voir avec le TP : le personnage marche pour de vrai, a sa propre
+-- WalkSpeed, en suivant un chemin PathfindingService. Le serveur ne voit
+-- qu'un joueur qui se deplace normalement, donc aucun risque de kick ni de
+-- remise a la base.
+function Movement.walkTo(position, label)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hum and root) then return false, "personnage absent" end
+
+    Movement.token = Movement.token + 1
+    local mine = Movement.token
+
+    spawnTask(function()
+        local path
+        local okPath = pcall(function()
+            path = game:GetService("PathfindingService"):CreatePath({
+                AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
+            })
+            path:ComputeAsync(root.Position, position)
+        end)
+
+        local waypoints
+        if okPath and path and path.Status == Enum.PathStatus.Success then
+            waypoints = path:GetWaypoints()
+        end
+
+        -- Pas de chemin calculable (base derriere un mur, trop loin) : on
+        -- marche quand meme en ligne droite, le joueur verra bien.
+        if not waypoints or #waypoints == 0 then
+            waypoints = { { Position = position, Action = nil } }
+        end
+
+        for _, wp in ipairs(waypoints) do
+            if State.Unloaded or Movement.token ~= mine then return end
+            local c = LocalPlayer.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            if not (h and r) or h.Health <= 0 then return end
+
+            if wp.Action == Enum.PathWaypointAction.Jump then
+                pcall(function() h.Jump = true end)
+            end
+            h:MoveTo(wp.Position)
+
+            -- MoveTo abandonne au bout de 8 s sans progres : on attend soit
+            -- l'arrivee, soit ce delai, puis on passe au point suivant.
+            local reached = false
+            local conn
+            conn = h.MoveToFinished:Connect(function(ok) reached = ok end)
+            local waited = 0
+            while not reached and waited < 8 do
+                if State.Unloaded or Movement.token ~= mine then
+                    conn:Disconnect() return
+                end
+                waited = waited + RunService.Heartbeat:Wait()
+            end
+            conn:Disconnect()
+        end
+    end)
+    return true, "en marche vers " .. tostring(label or "?")
 end
 
 function Movement.goTo(position, label)
@@ -4003,6 +4160,8 @@ local pagePlayers = addTab("Joueurs", Icon.users)
 local cardList = card(pagePlayers)
 local playersPanel = panel(cardList, 250)
 btn(cardList, { text = "Rafraichir la liste", icon = Icon.sync, callback = function()
+    -- on oublie les verdicts du filtre : les bases ont pu changer
+    Marks.owns = {}
     refreshPlayers()
     setStatus("liste rafraichie", THEME.good)
 end })
@@ -4135,27 +4294,17 @@ local function playerRow(scroll, plr)
         TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
 
-    local sendBtn = btn(row, { text = "TRADE", icon = Icon.send, iconSize = 11,
+    local addBtn = btn(row, { text = "ADD", icon = Icon.plus, iconSize = 11,
         width = 96, height = 26, textSize = 10, style = "primary",
         callback = function()
-            local ok, why = Trade.send(plr)
-            setStatus((ok and ("trade envoye a " .. plr.Name)
-                            or ("trade impossible : " .. tostring(why))),
-                ok and THEME.good or THEME.bad)
+            local ok, why = Trade.addFriend(plr)
+            setStatus(tostring(why), ok and THEME.good or THEME.bad)
         end })
-    sendBtn.Position = UDim2.new(0, 9, 0, 42)
+    addBtn.Position = UDim2.new(0, 9, 0, 42)
 
-    local tpBtn = btn(row, { text = "TP", icon = Icon.jump, iconSize = 12,
+    local walkBtn = btn(row, { text = "WALK", icon = Icon.jump, iconSize = 11,
         width = 94, height = 26, textSize = 10, callback = function()
-            -- le tapis d'abord : c'est lui qui rend le vol plausible
-            local okCarpet, carpetWhy = Movement.equipCarpet()
-            if not okCarpet then
-                setStatus(tostring(carpetWhy), THEME.warn)
-            end
-
-            -- La base seulement si elle est SURE. Sinon on vise le joueur
-            -- lui-meme : mieux vaut atterrir a cote de lui que sur une base
-            -- devinee, qui s'est deja revelee etre la sienne.
+            -- La base seulement si elle est SURE, sinon le joueur lui-meme.
             local _, cf, sure = Plots:ForPlayer(plr)
             local target = sure and cf and cf.Position
             local where = sure and ("base de " .. plr.Name) or plr.Name
@@ -4170,10 +4319,10 @@ local function playerRow(scroll, plr)
                 return
             end
 
-            local ok, why = Movement.goTo(target, where)
+            local ok, why = Movement.walkTo(target, where)
             setStatus(tostring(why), ok and THEME.good or THEME.bad)
         end })
-    tpBtn.Position = UDim2.new(0, 111, 0, 42)
+    walkBtn.Position = UDim2.new(0, 111, 0, 42)
 
     local see = btn(row, { text = "BASE", icon = Icon.eye, iconSize = 12,
         width = 96, height = 26, textSize = 10,
@@ -4182,13 +4331,36 @@ local function playerRow(scroll, plr)
     return row
 end
 
+-- Ce joueur possede-t-il au moins un des brainrots exiges ?
+-- On ne rescanne pas a chaque redessin : le verdict est garde jusqu'a ce
+-- que le filtre change ou que la liste soit rafraichie a la main.
+local function ownsWanted(plr)
+    if Marks.wantedCount() == 0 then return true end
+
+    local cached = Marks.owns[plr.UserId]
+    if cached ~= nil then return cached end
+
+    local plot, _, sure = Plots:ForPlayer(plr)
+    local list = {}
+    if sure and plot then list = Inspector.brainrots(plot) end
+    if #list == 0 then list = Inspector.nearPlayer(plr, CONFIG.PlazaRadius) end
+
+    local found = false
+    for _, entry in ipairs(list) do
+        if Marks.isWanted(normalizeName(entry.name)) then found = true break end
+    end
+    Marks.owns[plr.UserId] = found
+    return found
+end
+
 refreshPlayers = function()
     clearChildren(playersPanel)
 
-    local list, hidden = {}, 0
+    local list, hidden, filtered = {}, 0, 0
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
             if Marks.isHidden(plr.UserId) then hidden = hidden + 1
+            elseif not ownsWanted(plr) then filtered = filtered + 1
             else list[#list + 1] = plr end
         end
     end
@@ -4203,9 +4375,16 @@ refreshPlayers = function()
     for _, plr in ipairs(list) do playerRow(playersPanel, plr) end
 
     if #list == 0 then
-        textLine(playersPanel, hidden > 0
-            and ("les " .. hidden .. " autres joueurs sont masques")
-            or "aucun autre joueur dans le serveur", THEME.sub, Enum.Font.Gotham)
+        local why = "aucun autre joueur dans le serveur"
+        if filtered > 0 then
+            why = filtered .. " joueur(s) ecarte(s) : aucun n'a ce que tu cherches"
+        elseif hidden > 0 then
+            why = "les " .. hidden .. " autres joueurs sont masques"
+        end
+        textLine(playersPanel, why, THEME.sub, Enum.Font.Gotham)
+    elseif filtered > 0 then
+        textLine(playersPanel, filtered .. " joueur(s) ecarte(s) par le filtre",
+            THEME.dim, Enum.Font.Gotham)
     end
 end
 
@@ -4932,6 +5111,86 @@ do
     UI.refreshHidden = refreshHidden
 end
 
+----------------------------------------------------------------------------------
+-- Brainrots exiges : coche ce que tu cherches, les autres joueurs sautent
+----------------------------------------------------------------------------------
+do
+    local cardWanted = card(pageSettings, "Je cherche")
+    local wantedNote = dynamic(note(cardWanted, "", THEME.sub))
+    local search = field(cardWanted, "Chercher un brainrot...")
+    local panelW = panel(cardWanted, 190)
+
+    local function refreshNote()
+        local n = Marks.wantedCount()
+        wantedNote.Text = (n == 0)
+            and "rien de coche : tous les joueurs restent visibles"
+            or (n .. " coche(s) : les joueurs sans rien de tout ca sautent")
+    end
+
+    -- On ne peint que ce qui correspond a la recherche : 529 lignes d'un
+    -- coup ferait ramer l'ouverture des reglages.
+    local function rebuild()
+        clearChildren(panelW)
+        local query = Util.lower(Util.trim(search.Text or ""))
+        local shown = 0
+
+        for _, tier in ipairs(BRAINROT_TIERS) do
+            for _, name in ipairs(tier.names) do
+                local key = normalizeName(name)
+                local on = Marks.isWanted(key)
+                -- les coches restent visibles meme hors recherche, sinon on
+                -- ne peut plus les decocher
+                if on or (query ~= "" and string.find(Util.lower(name), query, 1, true)) then
+                    if shown < 60 then
+                        shown = shown + 1
+                        local row = corner(mk("TextButton", {
+                            Size = UDim2.new(1, -6, 0, 26),
+                            BackgroundColor3 = on and THEME.accent or THEME.cardHi,
+                            AutoButtonColor = false, Text = "",
+                            BorderSizePixel = 0, Parent = panelW,
+                        }), 7)
+                        stroke(row, on and THEME.accent or THEME.line, 1.4, 0.4)
+                        mk("TextLabel", {
+                            Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+                            BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+                            Text = name, TextSize = 11,
+                            TextColor3 = on and THEME.bg or THEME.text,
+                            TextXAlignment = Enum.TextXAlignment.Left,
+                            TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
+                        })
+                        Maid.conn(row.MouseButton1Click:Connect(function()
+                            Marks.setWanted(key, not Marks.isWanted(key))
+                            refreshNote()
+                            rebuild()
+                            refreshPlayers()
+                        end))
+                    end
+                end
+            end
+        end
+
+        if shown == 0 then
+            textLine(panelW, query == ""
+                and "tape un nom pour le chercher"
+                or "aucun brainrot ne correspond", THEME.sub, Enum.Font.Gotham)
+        end
+    end
+
+    Maid.conn(search:GetPropertyChangedSignal("Text"):Connect(rebuild))
+    btn(cardWanted, { text = "Tout decocher", icon = Icon.cross, callback = function()
+        CONFIG.Wanted = {}
+        Marks.owns = {}
+        Marks.setWanted("__vide__", false)
+        refreshNote()
+        rebuild()
+        refreshPlayers()
+    end })
+
+    refreshNote()
+    rebuild()
+    UI.refreshWanted = function() refreshNote() rebuild() end
+end
+
 local cardDisplay = card(pageSettings, "Affichage")
 switch(cardDisplay, "Tete des joueurs", "ShowAvatars")
 switch(cardDisplay, "Apercu 3D des brainrots", "ShowModels")
@@ -5000,7 +5259,9 @@ if UI.refreshPresets then UI.refreshPresets() end
 
 -- joueurs coches et joueurs vires lors des sessions precedentes
 Marks.load()
+Marks.loadWanted()
 if UI.refreshHidden then UI.refreshHidden() end
+if UI.refreshWanted then UI.refreshWanted() end
 if UI.refreshMode then UI.refreshMode() end
 
 -- couleur choisie au lancement precedent
