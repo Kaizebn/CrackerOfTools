@@ -13,7 +13,7 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { to: '/', label: 'Aujourd\'hui', icon: '🧠', branch: 'Noyau' },
+  { to: '/', label: 'Le cerveau', icon: '🧠', branch: 'Noyau' },
   { to: '/positionnement', label: 'Positionnement', icon: '🎯', branch: '1' },
   { to: '/idees', label: 'Idées', icon: '💡', branch: '2' },
   { to: '/ecriture', label: 'Écriture', icon: '✍️', branch: '3' },

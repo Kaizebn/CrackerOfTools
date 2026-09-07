@@ -48,3 +48,39 @@
   }
   .section-title { @apply text-lg font-bold text-white; }
 }
+
+/* ---------------------------------------------------------------------------
+   Brain hub (écran d'accueil immersif)
+--------------------------------------------------------------------------- */
+@layer components {
+  .hub-bg {
+    background:
+      radial-gradient(1200px 800px at 50% 42%, rgba(124,92,255,0.16), transparent 60%),
+      radial-gradient(900px 700px at 15% 90%, rgba(46,204,155,0.10), transparent 60%),
+      radial-gradient(900px 700px at 85% 10%, rgba(255,110,199,0.10), transparent 60%),
+      #06070c;
+  }
+}
+
+@keyframes brainPulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 22px rgba(124,92,255,0.55)); }
+  50%      { transform: scale(1.04); filter: drop-shadow(0 0 40px rgba(124,92,255,0.85)); }
+}
+@keyframes floatNode {
+  0%, 100% { transform: translate(-50%, -50%) translateY(0); }
+  50%      { transform: translate(-50%, -50%) translateY(-5px); }
+}
+@keyframes dashFlow { to { stroke-dashoffset: -1000; } }
+@keyframes ringSpin { to { transform: rotate(360deg); } }
+@keyframes popIn {
+  from { opacity: 0; transform: translate(-50%, -46%) scale(0.96); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.synapse { stroke-dasharray: 5 9; animation: dashFlow 14s linear infinite; }
+.brain-art { animation: brainPulse 4.5s ease-in-out infinite; transform-origin: center; }
+.hub-node { animation: floatNode 6s ease-in-out infinite; }
+.hub-node:hover .hub-neuron { transform: scale(1.12); }
+@media (prefers-reduced-motion: reduce) {
+  .brain-art, .hub-node, .synapse { animation: none; }
+}

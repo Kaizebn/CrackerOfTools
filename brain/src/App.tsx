@@ -4,7 +4,7 @@ import { initDB } from './lib/store';
 import { useSettings } from './lib/hooks';
 import Layout from './components/Layout';
 import Onboarding from './pages/Onboarding';
-import Home from './pages/Home';
+import BrainHub from './pages/BrainHub';
 import Positioning from './pages/Positioning';
 import Ideas from './pages/Ideas';
 import Writing from './pages/Writing';
@@ -25,8 +25,8 @@ function Shell() {
 
   return (
     <Routes>
+      <Route path="/" element={<BrainHub />} />
       <Route element={<Layout />}>
-        <Route path="/" element={<Home />} />
         <Route path="/positionnement" element={<Positioning />} />
         <Route path="/idees" element={<Ideas />} />
         <Route path="/ecriture" element={<Writing />} />
@@ -36,7 +36,7 @@ function Shell() {
         <Route path="/monetisation" element={<Monetization />} />
         <Route path="/progression" element={<Progression />} />
         <Route path="/reglages" element={<SettingsPage />} />
-        <Route path="*" element={<Home />} />
+        <Route path="*" element={<BrainHub />} />
       </Route>
     </Routes>
   );
