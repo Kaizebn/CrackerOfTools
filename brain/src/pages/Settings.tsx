@@ -3,8 +3,10 @@ import { useSettings } from '../lib/hooks';
 import { saveSettings } from '../lib/store';
 import { uid } from '../db/db';
 import {
-  Card, Field, Input, SectionTitle, ConfirmButton,
+  Card, Field, Input, Select, SectionTitle, ConfirmButton,
 } from '../components/ui';
+import { useAsync, Spark, AIErrorText } from '../components/ai';
+import { AI_MODELS, aiTest } from '../lib/ai';
 import { downloadBackup, importFromFile, wipeAll } from '../lib/backup';
 import type { Settings as S, Pillar } from '../db/types';
 
@@ -106,6 +108,8 @@ export default function SettingsPage() {
         <button className="btn-primary shadow-glow" onClick={save}>Enregistrer les réglages</button>
       </div>
 
+      <AICard form={form} set={set} />
+
       <Card className="space-y-4">
         <SectionTitle>Sauvegarde des données</SectionTitle>
         <p className="text-sm text-slate-500 -mt-2">
@@ -132,5 +136,51 @@ export default function SettingsPage() {
         </div>
       </Card>
     </div>
+  );
+}
+
+function AICard({ form, set }: { form: S; set: <K extends keyof S>(k: K, v: S[K]) => void }) {
+  const { loading, error, run } = useAsync();
+  const [ok, setOk] = useState('');
+  const test = () =>
+    run(async () => {
+      setOk('');
+      await aiTest(form);
+      setOk('Connexion réussie ✓');
+    });
+  return (
+    <Card className="space-y-4">
+      <SectionTitle>✨ Assistant IA (optionnel)</SectionTitle>
+      <p className="-mt-2 text-sm text-slate-500">
+        Branche BRAIN sur Claude pour générer des idées, des scripts, des titres et
+        des analyses. Ta clé est stockée <b>uniquement sur cet appareil</b> et n'est
+        envoyée qu'à Anthropic.
+      </p>
+      <Field label="Clé API Anthropic" hint="Se crée sur console.anthropic.com → API keys. Commence par sk-ant-…">
+        <Input
+          type="password"
+          value={form.aiApiKey ?? ''}
+          onChange={(e) => set('aiApiKey', e.target.value)}
+          placeholder="sk-ant-..."
+          autoComplete="off"
+        />
+      </Field>
+      <Field label="Modèle" hint="Pour débuter et dépenser le moins, choisis Haiku.">
+        <Select value={form.aiModel || 'claude-opus-5'} onChange={(e) => set('aiModel', e.target.value)}>
+          {AI_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+        </Select>
+      </Field>
+      <div className="flex items-center gap-3">
+        <Spark onClick={test} loading={loading} disabled={!form.aiApiKey?.trim()} className="btn-ghost">
+          Tester la connexion
+        </Spark>
+        {ok && <span className="text-sm text-accent-green">{ok}</span>}
+      </div>
+      <AIErrorText error={error} />
+      <p className="text-xs text-accent-amber">
+        ⚠️ Chaque génération consomme des crédits payants sur ton compte Anthropic
+        (quelques centimes). N'oublie pas d'enregistrer les réglages après avoir collé ta clé.
+      </p>
+    </Card>
   );
 }

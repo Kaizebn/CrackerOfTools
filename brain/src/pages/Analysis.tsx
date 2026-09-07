@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from 'recharts';
-import { useItems, useSettings, pillarLookup } from '../lib/hooks';
+import { useItems, useSettings, usePositioning, pillarLookup } from '../lib/hooks';
 import { updateItem } from '../lib/store';
 import {
   Card, Field, Input, Textarea, Modal, EmptyState, Badge, Stat,
@@ -12,10 +12,13 @@ import {
 } from '../lib/analysis';
 import { fmtNumber, fmtDate } from '../lib/format';
 import type { Item, VideoStats } from '../db/types';
+import { aiConfigured, aiAnalyze } from '../lib/ai';
+import { useAsync, Spark, AIErrorText, AIHint } from '../components/ai';
 
 export default function Analysis() {
   const items = useItems();
   const settings = useSettings();
+  const positioning = usePositioning();
   const pl = pillarLookup(settings.pillars);
   const [editing, setEditing] = useState<Item | null>(null);
 
@@ -49,6 +52,11 @@ export default function Analysis() {
   return (
     <div className="space-y-6">
       <Header />
+
+      {/* Coaching IA */}
+      {aiConfigured(settings)
+        ? <AICoach items={items} settings={settings} positioning={positioning} pillars={settings.pillars} />
+        : <AIHint />}
 
       {/* Totals */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -232,5 +240,32 @@ function StatsEditor({ item, onClose }: { item: Item; onClose: () => void }) {
         </div>
       </div>
     </Modal>
+  );
+}
+
+function AICoach({
+  items, settings, positioning, pillars,
+}: {
+  items: Item[];
+  settings: import('../db/types').Settings;
+  positioning: import('../db/types').Positioning;
+  pillars: import('../db/types').Pillar[];
+}) {
+  const { loading, error, run } = useAsync();
+  const [text, setText] = useState('');
+  const analyze = () => run(async () => { setText(await aiAnalyze(settings, items, positioning, pillars)); });
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <h2 className="section-title">✨ Coach IA</h2>
+        <Spark onClick={analyze} loading={loading} className="btn-primary btn-sm">
+          {text ? 'Réanalyser' : 'Analyser mes résultats'}
+        </Spark>
+      </div>
+      <AIErrorText error={error} />
+      {text
+        ? <div className="mt-3 whitespace-pre-wrap rounded-lg bg-ink-850 border border-ink-700 p-3 text-sm text-slate-200">{text}</div>
+        : !error && <p className="mt-2 text-sm text-slate-500">L'IA lit tes stats et tes tendances, puis te dit quoi faire ensuite.</p>}
+    </Card>
   );
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useItems, useHooks } from '../lib/hooks';
+import { useItems, useHooks, useSettings, usePositioning } from '../lib/hooks';
 import { updateItem } from '../lib/store';
 import { db, uid } from '../db/db';
 import {
@@ -7,6 +7,11 @@ import {
 } from '../components/ui';
 import { HOOK_TYPES, STATUS_LABELS } from '../db/types';
 import type { Item, ScriptData, HookType } from '../db/types';
+import {
+  aiConfigured, aiGenerateScript, aiGenerateTitles, aiGenerateHooks,
+} from '../lib/ai';
+import type { AIScriptShort, AIScriptLong, AIHook } from '../lib/ai';
+import { useAsync, Spark, AIErrorText } from '../components/ai';
 
 const WPM = 150; // mots par minute à l'oral
 
@@ -80,8 +85,26 @@ export default function Writing() {
 }
 
 function ScriptEditor({ item }: { item: Item }) {
+  const settings = useSettings();
+  const positioning = usePositioning();
   const [sc, setSc] = useState<ScriptData>(item.script);
   const [saved, setSaved] = useState(false);
+  const ai = useAsync();
+  const [titles, setTitles] = useState<string[]>([]);
+  const [aiHooks, setAiHooks] = useState<AIHook[]>([]);
+
+  const draftScript = () => ai.run(async () => {
+    const r = await aiGenerateScript(settings, item, positioning, settings.pillars);
+    if (item.format === 'short') {
+      const d = r as AIScriptShort;
+      setSc((s) => ({ ...s, hook: d.hook ?? s.hook, development: d.development ?? s.development, punchline: d.punchline ?? s.punchline, cta: d.cta ?? s.cta }));
+    } else {
+      const d = r as AIScriptLong;
+      setSc((s) => ({ ...s, hook: d.hook ?? s.hook, promise: d.promise ?? s.promise, chapters: d.chapters ?? s.chapters, retention: d.retention ?? s.retention, cta: d.cta ?? s.cta }));
+    }
+  });
+  const genTitles = () => ai.run(async () => { setTitles(await aiGenerateTitles(settings, item, positioning, settings.pillars)); });
+  const genHooks = () => ai.run(async () => { setAiHooks(await aiGenerateHooks(settings, item, positioning, settings.pillars)); });
   const set = <K extends keyof ScriptData>(k: K, v: ScriptData[K]) => setSc((s) => ({ ...s, [k]: v }));
 
   const words = scriptWordCount(sc, item.format);
@@ -108,6 +131,39 @@ function ScriptEditor({ item }: { item: Item }) {
           <Stat label="Durée lecture" value={duration} />
         </div>
       </div>
+
+      {aiConfigured(settings) && (
+        <div className="rounded-lg border border-brand/25 bg-brand/5 p-3 space-y-2">
+          <div className="flex flex-wrap gap-2">
+            <Spark onClick={draftScript} loading={ai.loading} className="btn-primary btn-sm">Brouillon complet</Spark>
+            <Spark onClick={genTitles} loading={ai.loading} className="btn-ghost btn-sm">Idées de titres</Spark>
+            <Spark onClick={genHooks} loading={ai.loading} className="btn-ghost btn-sm">Idées de hooks</Spark>
+          </div>
+          <AIErrorText error={ai.error} />
+          {titles.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-slate-400">Titres proposés (clique pour utiliser) :</div>
+              {titles.map((t, i) => (
+                <button key={i} onClick={() => updateItem(item.id, { title: t, finalTitle: t })} className="block w-full rounded bg-ink-850 px-2.5 py-1.5 text-left text-sm text-slate-200 hover:bg-ink-800">
+                  {t}
+                </button>
+              ))}
+            </div>
+          )}
+          {aiHooks.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-slate-400">Hooks proposés :</div>
+              {aiHooks.map((h, i) => (
+                <div key={i} className="flex items-center gap-2 rounded bg-ink-850 px-2.5 py-1.5 text-sm">
+                  <span className="chip bg-ink-700 text-slate-300 capitalize">{h.type}</span>
+                  <span className="flex-1 text-slate-200">{h.text}</span>
+                  <button className="btn-ghost btn-sm" onClick={() => set('hook', h.text)}>Utiliser</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="rounded-lg border border-ink-700 bg-ink-850 p-3 text-xs text-slate-500">
         Structure imposée pour un <b className="text-slate-300">{item.format === 'short' ? 'Short' : 'Long'}</b> —

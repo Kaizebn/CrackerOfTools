@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid,
 } from 'recharts';
-import { useItems, useSettings } from '../lib/hooks';
+import { useItems, useSettings, usePositioning } from '../lib/hooks';
 import { updateItem, saveSettings } from '../lib/store';
 import {
   Card, Field, Input, Textarea, Select, Modal, EmptyState, Badge, Stat,
@@ -10,6 +10,8 @@ import {
 import { fileToThumbnail } from '../lib/image';
 import { fmtDate, fmtDateTime } from '../lib/format';
 import type { Item, Platform } from '../db/types';
+import { aiConfigured, aiGeneratePublishMeta } from '../lib/ai';
+import { useAsync, Spark, AIErrorText } from '../components/ai';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const DOW = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
@@ -226,6 +228,9 @@ function RhythmEditor({ longs, shorts, onSave }: { longs: number; shorts: number
 }
 
 function PublishEditor({ item, onClose }: { item: Item; onClose: () => void }) {
+  const settings = useSettings();
+  const positioning = usePositioning();
+  const ai = useAsync();
   const [form, setForm] = useState<Item>(item);
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -283,6 +288,21 @@ function PublishEditor({ item, onClose }: { item: Item; onClose: () => void }) {
           </Field>
         </div>
 
+        {aiConfigured(settings) && (
+          <div>
+            <Spark
+              onClick={() => ai.run(async () => {
+                const meta = await aiGeneratePublishMeta(settings, form, positioning, settings.pillars);
+                setForm((f) => ({ ...f, description: meta.description || f.description, hashtags: meta.hashtags || f.hashtags }));
+              })}
+              loading={ai.loading}
+              className="btn-ghost btn-sm"
+            >
+              Générer description + hashtags
+            </Spark>
+            <AIErrorText error={ai.error} />
+          </div>
+        )}
         <Field label="Description">
           <Textarea value={form.description} onChange={(e) => set('description', e.target.value)} placeholder="Description de la vidéo" />
         </Field>

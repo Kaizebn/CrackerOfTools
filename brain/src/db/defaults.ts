@@ -26,6 +26,8 @@ export function defaultSettings(): Settings {
     longsPerWeek: 1,
     shortsPerWeek: 5,
     pillars: [],
+    aiApiKey: '',
+    aiModel: 'claude-opus-5',
   };
 }
 
