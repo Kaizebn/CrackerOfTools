@@ -284,3 +284,73 @@ export async function aiTest(settings: Settings): Promise<string> {
   const raw = await complete(settings, 'Réponds en un mot.', 'Dis "OK".', 20);
   return raw;
 }
+// ---------------------------------------------------------------------------
+// 5. Générer un positionnement complet à partir d'une idée floue
+// ---------------------------------------------------------------------------
+export interface AIPositioning {
+  niche: string;
+  subNiche: string;
+  audience: string;
+  promise: string;
+  tone: string;
+  avatarAge: string;
+  avatarProblem: string;
+  avatarWatches: string;
+  pillars: string[];
+}
+
+export async function aiGeneratePositioning(
+  settings: Settings, brief: string,
+): Promise<AIPositioning> {
+  const user = [
+    'Voici ce que la personne veut faire comme créateur de contenu (peut être flou) :',
+    `"${brief}"`,
+    '',
+    'Propose un positionnement CLAIR, précis et cohérent pour une chaîne YouTube/TikTok',
+    'qui part de zéro (pas d\'audience). Sois concret, évite le vague.',
+    'Réponds avec un objet JSON ayant EXACTEMENT ces clés :',
+    '"niche" (large), "subNiche" (plus précise), "audience" (à qui, précis),',
+    '"promise" (ce que le spectateur gagne), "tone" (2-3 mots),',
+    '"avatarAge", "avatarProblem" (le problème n°1 du spectateur type),',
+    '"avatarWatches" (ce qu\'il regarde déjà, ex. noms de chaînes ou types),',
+    '"pillars" (tableau de 3 à 5 noms COURTS de piliers de contenu).',
+  ].join('\n');
+  const raw = await complete(settings, SYSTEM_JSON, user, 2000);
+  const o = extractJSON<AIPositioning>(raw);
+  return {
+    niche: String(o.niche || ''),
+    subNiche: String(o.subNiche || ''),
+    audience: String(o.audience || ''),
+    promise: String(o.promise || ''),
+    tone: String(o.tone || ''),
+    avatarAge: String(o.avatarAge || ''),
+    avatarProblem: String(o.avatarProblem || ''),
+    avatarWatches: String(o.avatarWatches || ''),
+    pillars: Array.isArray(o.pillars) ? o.pillars.map(String).filter(Boolean).slice(0, 5) : [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 6. Suggérer des réponses à un commentaire
+// ---------------------------------------------------------------------------
+export async function aiGenerateReplies(
+  settings: Settings, positioning: Positioning, comment: string, videoTitle?: string,
+): Promise<string[]> {
+  const system =
+    'Tu aides un créateur de contenu à répondre à ses commentaires. ' +
+    'Tu écris en français, dans le ton du créateur, de façon chaleureuse et authentique, ' +
+    'jamais robotique. Réponses courtes. Tu réponds UNIQUEMENT en JSON valide.';
+  const user = [
+    positioning.tone ? `Ton du créateur : ${positioning.tone}` : '',
+    positioning.niche ? `Niche : ${positioning.niche}` : '',
+    videoTitle ? `Vidéo concernée : "${videoTitle}"` : '',
+    '',
+    `Commentaire reçu :\n"${comment}"`,
+    '',
+    'Propose 3 réponses possibles, variées (une chaleureuse, une qui apporte de la valeur,',
+    'une qui relance la conversation). Réponds avec un tableau JSON de 3 chaînes.',
+  ].filter(Boolean).join('\n');
+  const raw = await complete(settings, system, user, 1200);
+  const arr = extractJSON<string[]>(raw);
+  return Array.isArray(arr) ? arr.map(String).slice(0, 3) : [];
+}

@@ -10,7 +10,7 @@ import {
 import { fileToThumbnail } from '../lib/image';
 import { fmtDate, fmtDateTime } from '../lib/format';
 import type { Item, Platform } from '../db/types';
-import { aiConfigured, aiGeneratePublishMeta } from '../lib/ai';
+import { aiConfigured, aiGeneratePublishMeta, aiGenerateReplies } from '../lib/ai';
 import { useAsync, Spark, AIErrorText } from '../components/ai';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
@@ -22,6 +22,7 @@ function startOfWeek(d: Date) { const x = new Date(d); const day = (x.getDay() +
 export default function Publishing() {
   const items = useItems();
   const settings = useSettings();
+  const positioning = usePositioning();
   const [cursor, setCursor] = useState(new Date());
   const [editing, setEditing] = useState<Item | null>(null);
 
@@ -201,6 +202,8 @@ export default function Publishing() {
         <EmptyState icon="📅" title="Rien à publier pour l'instant" hint="Fais avancer une idée jusqu'au montage, puis reviens la publier ici." />
       )}
 
+      {aiConfigured(settings) && <CommentReplyCard settings={settings} positioning={positioning} />}
+
       {editing && <PublishEditor item={editing} onClose={() => setEditing(null)} />}
     </div>
   );
@@ -330,5 +333,43 @@ function PublishEditor({ item, onClose }: { item: Item; onClose: () => void }) {
         </div>
       </div>
     </Modal>
+  );
+}
+
+function CommentReplyCard({
+  settings, positioning,
+}: { settings: import('../db/types').Settings; positioning: import('../db/types').Positioning }) {
+  const { loading, error, run } = useAsync();
+  const [comment, setComment] = useState('');
+  const [replies, setReplies] = useState<string[]>([]);
+  const [copied, setCopied] = useState(-1);
+
+  const generate = () => run(async () => {
+    setReplies(await aiGenerateReplies(settings, positioning, comment.trim()));
+  });
+  const copy = async (i: number) => {
+    try { await navigator.clipboard.writeText(replies[i]); setCopied(i); setTimeout(() => setCopied(-1), 1500); } catch { /* ignore */ }
+  };
+
+  return (
+    <Card>
+      <h2 className="section-title mb-1">✨ Répondre à un commentaire</h2>
+      <p className="mb-3 text-sm text-slate-500">Colle un commentaire reçu, l'IA te propose 3 réponses dans ton ton.</p>
+      <Textarea value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Colle ici le commentaire d'un abonné…" />
+      <div className="mt-2 flex justify-end">
+        <Spark onClick={generate} loading={loading} disabled={!comment.trim()} className="btn-primary btn-sm">Proposer des réponses</Spark>
+      </div>
+      <AIErrorText error={error} />
+      {replies.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {replies.map((r, i) => (
+            <div key={i} className="flex items-start gap-2 rounded-lg border border-ink-700 bg-ink-850 p-3 text-sm">
+              <span className="flex-1 text-slate-200">{r}</span>
+              <button className="btn-ghost btn-sm shrink-0" onClick={() => copy(i)}>{copied === i ? 'Copié ✓' : 'Copier'}</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
