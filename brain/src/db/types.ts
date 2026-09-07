@@ -163,7 +163,8 @@ export interface Settings {
   longsPerWeek: number;   // rythme cible
   shortsPerWeek: number;
   pillars: Pillar[];
-  // Assistant IA (optionnel) — clé stockée localement, envoyée seulement à Anthropic.
+  // Assistant IA (optionnel) — clé stockée localement.
+  aiProvider: string; // 'anthropic' | 'openrouter'
   aiApiKey: string;
   aiModel: string;
 }

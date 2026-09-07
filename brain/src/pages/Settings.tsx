@@ -6,7 +6,7 @@ import {
   Card, Field, Input, Select, SectionTitle, ConfirmButton,
 } from '../components/ui';
 import { useAsync, Spark, AIErrorText } from '../components/ai';
-import { AI_MODELS, aiTest } from '../lib/ai';
+import { AI_MODELS, OPENROUTER_SUGGESTED, OPENROUTER_DEFAULT, aiTest } from '../lib/ai';
 import { downloadBackup, importFromFile, wipeAll } from '../lib/backup';
 import type { Settings as S, Pillar } from '../db/types';
 
@@ -148,28 +148,57 @@ function AICard({ form, set }: { form: S; set: <K extends keyof S>(k: K, v: S[K]
       await aiTest(form);
       setOk('Connexion réussie ✓');
     });
+  const provider = form.aiProvider === 'openrouter' ? 'openrouter' : 'anthropic';
+
+  // Switch provider and reset the model + test result to a sensible default.
+  const switchProvider = (p: string) => {
+    setOk('');
+    set('aiProvider', p);
+    if (p === 'openrouter' && !(form.aiModel || '').includes('/')) set('aiModel', OPENROUTER_DEFAULT);
+    if (p === 'anthropic' && (form.aiModel || '').includes('/')) set('aiModel', 'claude-opus-5');
+  };
+
   return (
     <Card className="space-y-4">
       <SectionTitle>✨ Assistant IA (optionnel)</SectionTitle>
       <p className="-mt-2 text-sm text-slate-500">
-        Branche BRAIN sur Claude pour générer des idées, des scripts, des titres et
+        Branche BRAIN sur une IA pour générer des idées, des scripts, des titres et
         des analyses. Ta clé est stockée <b>uniquement sur cet appareil</b> et n'est
-        envoyée qu'à Anthropic.
+        envoyée qu'au fournisseur choisi.
       </p>
-      <Field label="Clé API Anthropic" hint="Se crée sur console.anthropic.com → API keys. Commence par sk-ant-…">
-        <Input
-          type="password"
-          value={form.aiApiKey ?? ''}
-          onChange={(e) => set('aiApiKey', e.target.value)}
-          placeholder="sk-ant-..."
-          autoComplete="off"
-        />
-      </Field>
-      <Field label="Modèle" hint="Pour débuter et dépenser le moins, choisis Haiku.">
-        <Select value={form.aiModel || 'claude-opus-5'} onChange={(e) => set('aiModel', e.target.value)}>
-          {AI_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+
+      <Field label="Fournisseur" hint="OpenRouter = une seule clé pour plein de modèles, souvent moins cher (options gratuites).">
+        <Select value={provider} onChange={(e) => switchProvider(e.target.value)}>
+          <option value="anthropic">Anthropic (Claude, direct)</option>
+          <option value="openrouter">OpenRouter (multi-modèles)</option>
         </Select>
       </Field>
+
+      {provider === 'anthropic' ? (
+        <>
+          <Field label="Clé API Anthropic" hint="Se crée sur console.anthropic.com → API keys. Commence par sk-ant-…">
+            <Input type="password" value={form.aiApiKey ?? ''} onChange={(e) => set('aiApiKey', e.target.value)} placeholder="sk-ant-..." autoComplete="off" />
+          </Field>
+          <Field label="Modèle" hint="Pour débuter et dépenser le moins, choisis Haiku.">
+            <Select value={form.aiModel || 'claude-opus-5'} onChange={(e) => set('aiModel', e.target.value)}>
+              {AI_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </Select>
+          </Field>
+        </>
+      ) : (
+        <>
+          <Field label="Clé API OpenRouter" hint="Se crée sur openrouter.ai → Keys. Commence par sk-or-…">
+            <Input type="password" value={form.aiApiKey ?? ''} onChange={(e) => set('aiApiKey', e.target.value)} placeholder="sk-or-..." autoComplete="off" />
+          </Field>
+          <Field label="Modèle" hint="Copie l'identifiant exact depuis openrouter.ai/models. Astuce : un id finissant par « :free » est gratuit (mais parfois limité).">
+            <Input list="or-models" value={form.aiModel || OPENROUTER_DEFAULT} onChange={(e) => set('aiModel', e.target.value)} placeholder="anthropic/claude-3.5-haiku" autoComplete="off" />
+            <datalist id="or-models">
+              {OPENROUTER_SUGGESTED.map((m) => <option key={m} value={m} />)}
+            </datalist>
+          </Field>
+        </>
+      )}
+
       <div className="flex items-center gap-3">
         <Spark onClick={test} loading={loading} disabled={!form.aiApiKey?.trim()} className="btn-ghost">
           Tester la connexion
@@ -178,8 +207,8 @@ function AICard({ form, set }: { form: S; set: <K extends keyof S>(k: K, v: S[K]
       </div>
       <AIErrorText error={error} />
       <p className="text-xs text-accent-amber">
-        ⚠️ Chaque génération consomme des crédits payants sur ton compte Anthropic
-        (quelques centimes). N'oublie pas d'enregistrer les réglages après avoir collé ta clé.
+        ⚠️ Chaque génération consomme des crédits sur ton compte {provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'}
+        {provider === 'openrouter' ? ' (des modèles gratuits existent).' : ' (quelques centimes).'} N'oublie pas d'enregistrer les réglages après avoir collé ta clé.
       </p>
     </Card>
   );

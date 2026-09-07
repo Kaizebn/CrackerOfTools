@@ -4,29 +4,51 @@ import { HOOK_TYPES } from '../db/types';
 import { published, detectPatterns } from './analysis';
 
 // ---------------------------------------------------------------------------
-// Assistant IA — appelle Claude directement depuis le navigateur avec la clé
-// de l'utilisateur (stockée localement). Aucune donnée ne transite par un
-// serveur tiers : l'appel va directement à l'API Anthropic.
+// Assistant IA — appelle un modèle directement depuis le navigateur avec la clé
+// de l'utilisateur (stockée localement). Deux fournisseurs au choix :
+//  - "anthropic"  : appel direct à l'API Anthropic (SDK officiel).
+//  - "openrouter" : passerelle multi-modèles compatible OpenAI (une clé, plein
+//                   de modèles, souvent moins cher, options gratuites).
+// Aucune donnée ne transite par un serveur tiers : l'appel va directement au
+// fournisseur choisi.
 // ---------------------------------------------------------------------------
 
+// Modèles proposés pour Anthropic direct.
 export const AI_MODELS = [
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5 — le moins cher (recommandé pour débuter)', price: '≈ 1$/1M tokens' },
   { id: 'claude-sonnet-5', label: 'Sonnet 5 — équilibré', price: '≈ 2$/1M tokens' },
   { id: 'claude-opus-5', label: 'Opus 5 — le plus intelligent', price: '≈ 5$/1M tokens' },
 ];
 
+// Quelques identifiants OpenRouter courants (à copier depuis openrouter.ai/models).
+export const OPENROUTER_SUGGESTED = [
+  'anthropic/claude-3.5-haiku',
+  'anthropic/claude-3.5-sonnet',
+  'openai/gpt-4o-mini',
+  'google/gemini-flash-1.5',
+  'deepseek/deepseek-chat',
+  'meta-llama/llama-3.3-70b-instruct',
+];
+export const OPENROUTER_DEFAULT = 'anthropic/claude-3.5-haiku';
+
 export function aiConfigured(settings: Settings): boolean {
   return Boolean(settings.aiApiKey && settings.aiApiKey.trim());
+}
+
+export function aiProvider(settings: Settings): 'anthropic' | 'openrouter' {
+  return settings.aiProvider === 'openrouter' ? 'openrouter' : 'anthropic';
 }
 
 export class AIError extends Error {}
 
 function friendly(err: unknown): AIError {
   const status = (err as { status?: number })?.status;
-  if (status === 401) return new AIError('Clé API invalide. Vérifie-la dans les Réglages.');
+  if (status === 401 || status === 403) return new AIError('Clé API invalide ou non autorisée. Vérifie-la dans les Réglages.');
+  if (status === 402) return new AIError('Crédits insuffisants sur ton compte. Recharge ou passe à un modèle gratuit.');
+  if (status === 404) return new AIError('Modèle introuvable. Vérifie l\'identifiant du modèle dans les Réglages.');
   if (status === 429) return new AIError('Trop de requêtes ou quota atteint. Réessaie dans un instant.');
   if (status === 400) return new AIError('Requête refusée par l\'API. Réessaie ou change de modèle.');
-  if (status && status >= 500) return new AIError('Serveur Anthropic indisponible. Réessaie plus tard.');
+  if (status && status >= 500) return new AIError('Serveur indisponible. Réessaie plus tard.');
   const name = (err as Error)?.name || '';
   const msg = (err as Error)?.message || '';
   if (name === 'APIConnectionError' || /connection|connect|network|fetch|failed|timeout|cors/i.test(msg)) {
@@ -35,7 +57,56 @@ function friendly(err: unknown): AIError {
   return new AIError(msg || 'Erreur inconnue de l\'assistant IA.');
 }
 
-// Low-level call. Returns the concatenated text of the response.
+// --- Provider back-ends (throw raw errors; complete() maps them) ------------
+
+async function rawAnthropic(settings: Settings, system: string, user: string, maxTokens: number): Promise<string> {
+  const client = new Anthropic({
+    apiKey: settings.aiApiKey.trim(),
+    dangerouslyAllowBrowser: true, // app locale mono-utilisateur : la clé reste sur l'appareil
+  });
+  const resp = await client.messages.create({
+    model: settings.aiModel || 'claude-opus-5',
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: 'user', content: user }],
+  });
+  return resp.content
+    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
+}
+
+// OpenRouter uses the OpenAI-compatible chat/completions shape.
+async function rawOpenRouter(settings: Settings, system: string, user: string, maxTokens: number): Promise<string> {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${settings.aiApiKey.trim()}`,
+      'Content-Type': 'application/json',
+      'X-Title': 'BRAIN',
+    },
+    body: JSON.stringify({
+      model: settings.aiModel || OPENROUTER_DEFAULT,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.error?.message || ''; } catch { /* ignore */ }
+    const e = new Error(detail || `HTTP ${res.status}`) as Error & { status?: number };
+    e.status = res.status;
+    throw e;
+  }
+  const data = await res.json();
+  return String(data?.choices?.[0]?.message?.content || '').trim();
+}
+
+// Low-level call. Returns the text of the response, provider-aware.
 async function complete(
   settings: Settings,
   system: string,
@@ -45,23 +116,12 @@ async function complete(
   if (!aiConfigured(settings)) {
     throw new AIError('Assistant IA non configuré. Ajoute ta clé API dans les Réglages.');
   }
-  const client = new Anthropic({
-    apiKey: settings.aiApiKey.trim(),
-    dangerouslyAllowBrowser: true, // app locale mono-utilisateur : la clé reste sur l'appareil
-  });
   try {
-    const resp = await client.messages.create({
-      model: settings.aiModel || 'claude-opus-5',
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: 'user', content: user }],
-    });
-    return resp.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim();
+    return aiProvider(settings) === 'openrouter'
+      ? await rawOpenRouter(settings, system, user, maxTokens)
+      : await rawAnthropic(settings, system, user, maxTokens);
   } catch (err) {
+    if (err instanceof AIError) throw err;
     throw friendly(err);
   }
 }
