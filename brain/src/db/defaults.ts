@@ -73,6 +73,7 @@ export function newItem(partial: Partial<Item> = {}): Item {
     whyItWorks: '',
     hookType: null,
     script: emptyScript(),
+    storyboard: [],
     filmingChecklist: defaultFilmingChecklist(),
     editingChecklist: defaultEditingChecklist(),
     timeSpent: { scripting: 0, filming: 0, editing: 0, thumbnail: 0, other: 0 },

@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
-import { useItems } from '../lib/hooks';
+import { useItems, useSettings, usePositioning } from '../lib/hooks';
 import { updateItem } from '../lib/store';
 import { uid } from '../db/db';
 import { Card, Input, EmptyState, Badge, Stat } from '../components/ui';
 import { fmtMinutes } from '../lib/format';
-import type { Item, ChecklistItem, TimeSpent } from '../db/types';
+import type { Item, ChecklistItem, TimeSpent, Shot } from '../db/types';
+import { aiConfigured, aiGenerateStoryboard, hasScript } from '../lib/ai';
+import { useAsync, Spark, AIErrorText, AIHint } from '../components/ai';
 import { STATUS_LABELS } from '../db/types';
 
 const STEP_LABELS: Record<keyof TimeSpent, string> = {
@@ -110,6 +112,8 @@ function ProdEditor({ item }: { item: Item }) {
         </div>
       </Card>
 
+      <StoryboardCard item={item} />
+
       <TimeTracker item={item} />
 
       <div className="flex flex-wrap gap-2">
@@ -187,6 +191,58 @@ function TimeTracker({ item }: { item: Item }) {
           </label>
         ))}
       </div>
+    </Card>
+  );
+}
+
+function StoryboardCard({ item }: { item: Item }) {
+  const settings = useSettings();
+  const positioning = usePositioning();
+  const { loading, error, run } = useAsync();
+  const shots: Shot[] = item.storyboard || [];
+  const total = shots.reduce((a, sh) => a + (sh.duration || 0), 0);
+
+  const generate = () => run(async () => {
+    const sb = await aiGenerateStoryboard(settings, item, positioning);
+    await updateItem(item.id, { storyboard: sb });
+  });
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="font-bold text-white">🎬 Plan de tournage</h3>
+          <p className="text-xs text-slate-500">L'IA découpe ton script en plans prêts à filmer.</p>
+        </div>
+        {aiConfigured(settings) && (
+          <Spark onClick={generate} loading={loading} disabled={!hasScript(item)} className="btn-primary btn-sm">
+            {shots.length ? 'Régénérer' : 'Générer le plan'}
+          </Spark>
+        )}
+      </div>
+
+      {!aiConfigured(settings) && <div className="mt-3"><AIHint /></div>}
+      {aiConfigured(settings) && !hasScript(item) && (
+        <p className="mt-2 text-sm text-slate-500">Écris d'abord le script de cette vidéo (branche Écriture), puis reviens générer le plan.</p>
+      )}
+      <AIErrorText error={error} />
+
+      {shots.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <div className="text-xs text-slate-500">{shots.length} plan(s) · durée estimée ≈ {total}s</div>
+          {shots.map((sh, i) => (
+            <div key={i} className="rounded-lg border border-ink-700 bg-ink-850 p-3">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wide text-brand-soft">Plan {i + 1}</span>
+                {sh.duration > 0 && <span className="text-xs text-slate-500">≈ {sh.duration}s</span>}
+              </div>
+              {sh.visual && <p className="text-sm text-slate-200"><span className="text-slate-500">🎥 Visuel :</span> {sh.visual}</p>}
+              {sh.voiceover && <p className="mt-0.5 text-sm text-slate-300"><span className="text-slate-500">🎙️ Voix off :</span> {sh.voiceover}</p>}
+              {sh.text && <p className="mt-0.5 text-sm text-accent-amber"><span className="text-slate-500">💬 Texte écran :</span> {sh.text}</p>}
+            </div>
+          ))}
+        </div>
+      )}
     </Card>
   );
 }

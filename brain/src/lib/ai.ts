@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Settings, Positioning, Item, Pillar, ContentFormat } from '../db/types';
+import type { Settings, Positioning, Item, Pillar, ContentFormat, Shot } from '../db/types';
 import { HOOK_TYPES } from '../db/types';
 import { published, detectPatterns } from './analysis';
 
@@ -413,4 +413,60 @@ export async function aiGenerateReplies(
   const raw = await complete(settings, system, user, 1200);
   const arr = extractJSON<string[]>(raw);
   return Array.isArray(arr) ? arr.map(String).slice(0, 3) : [];
+}
+// ---------------------------------------------------------------------------
+// 7. Plan de tournage (storyboard) à partir du script
+// ---------------------------------------------------------------------------
+function scriptToText(item: Item): string {
+  const sc = item.script;
+  if (item.format === 'short') {
+    return [
+      sc.hook && `HOOK: ${sc.hook}`,
+      sc.development && `DEVELOPPEMENT: ${sc.development}`,
+      sc.punchline && `CHUTE: ${sc.punchline}`,
+      sc.cta && `CTA: ${sc.cta}`,
+    ].filter(Boolean).join('\n');
+  }
+  return [
+    sc.hook && `HOOK: ${sc.hook}`,
+    sc.promise && `PROMESSE: ${sc.promise}`,
+    sc.chapters && `CORPS: ${sc.chapters}`,
+    sc.retention && `RETENTION: ${sc.retention}`,
+    sc.cta && `CTA: ${sc.cta}`,
+  ].filter(Boolean).join('\n');
+}
+
+export function hasScript(item: Item): boolean {
+  return scriptToText(item).trim().length > 0;
+}
+
+export async function aiGenerateStoryboard(
+  settings: Settings, item: Item, positioning: Positioning,
+): Promise<Shot[]> {
+  const script = scriptToText(item);
+  const user = [
+    positioning.tone ? `Ton : ${positioning.tone}` : '',
+    `Format : ${item.format === 'short' ? 'Short vertical (rythmé, plans courts)' : 'Vidéo longue horizontale'}`,
+    `Titre : ${item.title || item.finalTitle || 'Sans titre'}`,
+    '',
+    'Voici le script :',
+    script,
+    '',
+    'Transforme ce script en PLAN DE TOURNAGE, plan par plan, prêt à filmer et monter.',
+    'Pour chaque plan, donne :',
+    '"visual" (ce qu\'on filme / montre à l\'écran : cadrage, action, b-roll),',
+    '"voiceover" (ce qui est dit sur ce plan, extrait du script),',
+    '"text" (texte incrusté à l\'écran, TRÈS court, peut être ""),',
+    '"duration" (durée estimée en secondes, entier).',
+    'Reste réaliste et concret. Réponds avec un tableau JSON de plans.',
+  ].filter(Boolean).join('\n');
+
+  const raw = await complete(settings, SYSTEM_JSON, user, 4000);
+  const arr = extractJSON<Shot[]>(raw);
+  return (Array.isArray(arr) ? arr : []).map((sh) => ({
+    visual: String(sh.visual || ''),
+    voiceover: String(sh.voiceover || ''),
+    text: String(sh.text || ''),
+    duration: Math.max(0, Math.round(Number(sh.duration) || 0)),
+  }));
 }

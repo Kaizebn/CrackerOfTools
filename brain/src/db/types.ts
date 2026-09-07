@@ -95,6 +95,14 @@ export function emptyScript(): ScriptData {
   };
 }
 
+// One shot of a filming plan (storyboard) generated from the script.
+export interface Shot {
+  visual: string;    // ce qu'on montre / filme
+  voiceover: string; // ce qu'on dit
+  text: string;      // texte incrusté à l'écran (court, peut être vide)
+  duration: number;  // durée estimée en secondes
+}
+
 // The central content object: one row per video-in-the-making.
 export interface Item {
   id: string;
@@ -108,6 +116,7 @@ export interface Item {
   whyItWorks: string;        // obligatoire pour valider
   hookType: HookType | null; // pour la détection de motifs
   script: ScriptData;
+  storyboard: Shot[];
 
   // Production
   filmingChecklist: ChecklistItem[];
