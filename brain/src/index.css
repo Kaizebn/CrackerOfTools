@@ -1,0 +1,50 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-ink-950 text-slate-200 font-sans antialiased;
+  }
+  /* Dense, readable scrollbars */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2e3448; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4159; }
+  /* Nicer default focus */
+  :focus-visible { outline: 2px solid #7c5cff; outline-offset: 1px; }
+}
+
+@layer components {
+  .card {
+    @apply bg-ink-900 border border-ink-700/70 rounded-xl shadow-card;
+  }
+  .card-pad { @apply p-4 sm:p-5; }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold
+           transition-colors select-none disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary { @apply btn bg-brand text-white hover:bg-brand-soft; }
+  .btn-ghost   { @apply btn bg-ink-800 text-slate-200 hover:bg-ink-700 border border-ink-700; }
+  .btn-danger  { @apply btn bg-accent-red/15 text-accent-red hover:bg-accent-red/25 border border-accent-red/30; }
+  .btn-sm      { @apply px-2.5 py-1.5 text-xs; }
+
+  .input {
+    @apply w-full rounded-lg bg-ink-850 border border-ink-700 px-3 py-2 text-sm text-slate-100
+           placeholder:text-slate-500 focus:border-brand focus:ring-0 transition-colors;
+  }
+  .label { @apply block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1.5; }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+  .section-title { @apply text-lg font-bold text-white; }
+}
