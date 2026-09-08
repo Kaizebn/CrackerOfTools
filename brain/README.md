@@ -65,3 +65,28 @@ utilise **Exporter (JSON)** régulièrement. Tu peux tout restaurer avec **Impor
 - **react-router-dom** — la navigation entre les branches.
 
 Aucune clé API, aucun serveur, aucune connexion nécessaire pour le fonctionnement.
+
+## 🌐 Site en ligne + installation (PWA)
+
+BRAIN est une **PWA** : un vrai site web qui s'**installe** comme une app (sur
+téléphone et ordinateur) et **fonctionne hors ligne** une fois chargé.
+
+### L'installer comme app
+- **Android / Chrome** : menu ⋮ → « Installer l'application » (ou « Ajouter à
+  l'écran d'accueil »).
+- **iPhone / Safari** : bouton Partager → « Sur l'écran d'accueil ».
+- **Ordinateur / Chrome-Edge** : icône d'installation ⊕ dans la barre d'adresse.
+
+### Le mettre en ligne (gratuit, via GitHub Pages)
+Le dépôt contient un workflow (`.github/workflows/deploy-brain.yml`) qui
+construit et publie l'app automatiquement.
+
+1. Sur GitHub : **Settings → Pages → Source = « GitHub Actions »**.
+2. Pousse ta branche (le workflow se déclenche sur les changements de `brain/`),
+   ou lance-le à la main dans l'onglet **Actions → Deploy BRAIN to GitHub Pages
+   → Run workflow**.
+3. L'URL du site s'affiche à la fin du job (ex :
+   `https://<ton-pseudo>.github.io/crackeroftools/`).
+
+Le build utilise des chemins **relatifs**, donc l'app marche quel que soit le
+sous-dossier — y compris ouverte localement depuis `dist/`.
