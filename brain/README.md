@@ -90,3 +90,18 @@ construit et publie l'app automatiquement.
 
 Le build utilise des chemins **relatifs**, donc l'app marche quel que soit le
 sous-dossier — y compris ouverte localement depuis `dist/`.
+
+## 🔤 Sous-titres automatiques (branche Production)
+
+BRAIN peut transcrire ta vidéo/audio **directement dans le navigateur** (avec
+Whisper) et te sortir un fichier **.srt / .vtt / texte** à glisser dans ton
+montage.
+
+- 100 % local : ton fichier **ne quitte jamais ton appareil**, aucune clé.
+- La 1re fois, le modèle se télécharge (~40–150 Mo selon le choix) puis reste en
+  cache. Il faut donc une connexion internet **au premier usage**.
+- Option « style court » pour des sous-titres façon TikTok (petits groupes de mots).
+
+> Astuce : pour des sous-titres calés au mot près sur ta voix, un outil de
+> montage comme CapCut (sous-titres auto, gratuit) reste imbattable. BRAIN te
+> dépanne quand tu veux un .srt sans quitter l'app.

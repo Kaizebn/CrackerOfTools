@@ -1,8 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useItems, useSettings, usePositioning } from '../lib/hooks';
 import { updateItem } from '../lib/store';
 import { uid } from '../db/db';
-import { Card, Input, EmptyState, Badge, Stat } from '../components/ui';
+import { Card, Input, EmptyState, Badge, Stat, Select, ProgressBar } from '../components/ui';
+import {
+  SUB_MODELS, transcribe, toSRT, toVTT, toShortCaptions, downloadText,
+} from '../lib/subtitles';
+import type { Chunk } from '../lib/subtitles';
 import { fmtMinutes } from '../lib/format';
 import type { Item, ChecklistItem, TimeSpent, Shot } from '../db/types';
 import { aiConfigured, aiGenerateStoryboard, hasScript } from '../lib/ai';
@@ -88,6 +92,8 @@ export default function Production() {
           {selected && <ProdEditor key={selected.id} item={selected} />}
         </div>
       )}
+
+      <SubtitlesCard />
     </div>
   );
 }
@@ -241,6 +247,129 @@ function StoryboardCard({ item }: { item: Item }) {
               {sh.text && <p className="mt-0.5 text-sm text-accent-amber"><span className="text-slate-500">💬 Texte écran :</span> {sh.text}</p>}
             </div>
           ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function SubtitlesCard() {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [model, setModel] = useState(SUB_MODELS[0].id);
+  const [lang, setLang] = useState('french');
+  const [short, setShort] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ label: string; percent: number } | null>(null);
+  const [error, setError] = useState('');
+  const [chunks, setChunks] = useState<Chunk[] | null>(null);
+
+  const run = async () => {
+    if (!file) return;
+    setBusy(true); setError(''); setChunks(null); setProgress({ label: 'Démarrage…', percent: 0 });
+    try {
+      const res = await transcribe(file, {
+        model,
+        language: lang === 'auto' ? undefined : lang,
+        onProgress: (p) => setProgress(p),
+      });
+      setChunks(res.chunks);
+    } catch (e) {
+      const msg = (e as Error).message || '';
+      setError(
+        /fetch|network|load|download|tunnel|cors/i.test(msg)
+          ? 'Impossible de télécharger le modèle de transcription. Vérifie ta connexion internet et réessaie (le modèle se télécharge une seule fois).'
+          : msg || 'Échec de la transcription.',
+      );
+    } finally {
+      setBusy(false); setProgress(null);
+    }
+  };
+
+  const finalChunks = chunks ? (short ? toShortCaptions(chunks, 4) : chunks) : [];
+  const baseName = (file?.name || 'sous-titres').replace(/\.[^.]+$/, '');
+
+  return (
+    <Card>
+      <h2 className="section-title mb-1">🔤 Sous-titres automatiques</h2>
+      <p className="mb-3 text-sm text-slate-500">
+        Dépose ta vidéo/audio : l'IA la transcrit <b>sur ton appareil</b> (rien n'est
+        envoyé). Tu récupères un fichier <b>.srt</b> à glisser dans ton logiciel de montage.
+      </p>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <span className="label">Fichier vidéo ou audio</span>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="video/*,audio/*"
+            className="hidden"
+            onChange={(e) => { setFile(e.target.files?.[0] || null); setChunks(null); setError(''); }}
+          />
+          <button className="btn-ghost w-full" onClick={() => fileRef.current?.click()} disabled={busy}>
+            {file ? `📄 ${file.name}` : 'Choisir un fichier…'}
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="label">Modèle</span>
+            <Select value={model} onChange={(e) => setModel(e.target.value)} disabled={busy}>
+              {SUB_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </Select>
+          </label>
+          <label className="block">
+            <span className="label">Langue</span>
+            <Select value={lang} onChange={(e) => setLang(e.target.value)} disabled={busy}>
+              <option value="french">Français</option>
+              <option value="english">Anglais</option>
+              <option value="auto">Détecter</option>
+            </Select>
+          </label>
+        </div>
+      </div>
+
+      <label className="mt-3 flex items-center gap-2 text-sm text-slate-300">
+        <input type="checkbox" className="h-4 w-4 accent-brand" checked={short} onChange={(e) => setShort(e.target.checked)} disabled={busy} />
+        Style court (petits groupes de mots, façon TikTok)
+      </label>
+
+      <div className="mt-3 flex items-center gap-3">
+        <button className="btn-primary" onClick={run} disabled={!file || busy}>
+          {busy ? 'Transcription…' : 'Générer les sous-titres'}
+        </button>
+        {chunks && !busy && (
+          <>
+            <button className="btn-ghost btn-sm" onClick={() => downloadText(`${baseName}.srt`, toSRT(finalChunks))}>⬇️ .srt</button>
+            <button className="btn-ghost btn-sm" onClick={() => downloadText(`${baseName}.vtt`, toVTT(finalChunks))}>⬇️ .vtt</button>
+            <button className="btn-ghost btn-sm" onClick={() => downloadText(`${baseName}.txt`, finalChunks.map((c) => c.text).join(' '))}>⬇️ texte</button>
+          </>
+        )}
+      </div>
+
+      {progress && (
+        <div className="mt-3">
+          <div className="mb-1 flex justify-between text-xs text-slate-400">
+            <span>{progress.label}</span><span>{progress.percent}%</span>
+          </div>
+          <ProgressBar value={progress.percent} />
+          <p className="mt-1 text-xs text-slate-600">La 1re fois, le modèle se télécharge (~40–150 Mo) puis reste en cache. Ça peut prendre un moment.</p>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-sm text-accent-red">⚠️ {error}</p>}
+
+      {chunks && !busy && (
+        <div className="mt-4">
+          <div className="mb-2 text-xs text-slate-500">{finalChunks.length} ligne(s) de sous-titres</div>
+          <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-ink-700 bg-ink-850 p-2">
+            {finalChunks.map((c, i) => (
+              <div key={i} className="flex gap-3 rounded px-2 py-1 text-sm">
+                <span className="shrink-0 font-mono text-xs text-slate-500">{c.start.toFixed(1)}s</span>
+                <span className="text-slate-200">{c.text}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </Card>
