@@ -7,11 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:single": "vite build --config vite.config.single.ts && node scripts/inline-single.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
-    "@huggingface/transformers": "^4.2.0",
     "dexie": "^4.4.5",
     "dexie-react-hooks": "^4.4.0",
     "react": "^19.2.8",
@@ -29,6 +29,7 @@
     "postcss": "^8.5.28",
     "tailwindcss": "^3.4.19",
     "typescript": "~6.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "vite-plugin-singlefile": "^2.3.3"
   }
 }

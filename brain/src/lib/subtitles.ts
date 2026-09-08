@@ -52,7 +52,16 @@ export async function transcribe(
   opts.onProgress?.({ label: 'Lecture de l\'audio…', percent: 5 });
   const audio = await decodeToMono16k(file);
 
-  const { pipeline, env } = await import('@huggingface/transformers');
+  // Load transformers.js from a CDN at runtime (keeps it out of the bundle so
+  // the app can also ship as a single self-contained index.html).
+  const CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm';
+  const mod = (await import(/* @vite-ignore */ CDN)) as {
+    pipeline: (task: string, model: string, opts?: unknown) => Promise<
+      (audio: Float32Array, opts?: unknown) => Promise<unknown>
+    >;
+    env: { allowLocalModels: boolean };
+  };
+  const { pipeline, env } = mod;
   // Fetch models from the Hugging Face hub (no local model files bundled).
   env.allowLocalModels = false;
 
