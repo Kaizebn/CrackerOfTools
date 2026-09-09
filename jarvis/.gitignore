@@ -1,0 +1,5 @@
+# Fichiers générés par l'agent — on ne les envoie pas dans le dépôt.
+captures/
+journaux/
+__pycache__/
+*.pyc

@@ -1,0 +1,3 @@
+# Dépendances de l'agent — Étape 1
+# Pillow sert uniquement à la capture d'écran (fonction capture_ecran).
+Pillow>=10.0
