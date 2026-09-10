@@ -1,5 +1,7 @@
 # Dépendances de l'agent JARVIS
-# Pillow    : capture d'écran (backend, fonction capture_ecran)
-# pywebview : fenêtre transparente du HUD (hud.py)
+# Pillow     : capture d'écran (backend, fonction capture_ecran)
+# pywebview  : fenêtre transparente du HUD (hud.py / app.py)
+# websockets : pont temps réel backend <-> HUD (serveur.py)
 Pillow>=10.0
 pywebview>=4.4
+websockets>=12.0

@@ -1,6 +1,7 @@
-/* hud.js — animation du HUD (Étape 2).
-   Pour l'instant le HUD est "vivant" (anneaux + onde) mais PAS encore relié
-   au backend : c'est le sujet de l'Étape 3. */
+/* hud.js — animation du HUD + connexion au backend (Étape 3).
+   - Le cercle (anneaux + onde) tourne toujours.
+   - Si le backend (serveur WebSocket) est là, le HUD RÉAGIT : état + journal.
+   - S'il n'est pas là (HUD lancé seul), le HUD reste en animation d'ambiance. */
 (() => {
   "use strict";
   const reduit = matchMedia("(prefers-reduced-motion:reduce)").matches;
@@ -9,17 +10,55 @@
   const N = 84;
   const donnees = new Float32Array(N);
 
-  function accent(){ return getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#22e0d6"; }
+  // --- États : couleur + énergie de l'onde + libellé ---
+  const ETATS = {
+    veille:    {couleur:"#22e0d6", ampli:0.35, label:"VEILLE"},
+    ecoute:    {couleur:"#2ff0e6", ampli:1.00, label:"ÉCOUTE"},
+    reflexion: {couleur:"#79c8ff", ampli:0.60, label:"RÉFLEXION"},
+    action:    {couleur:"#ff8a3c", ampli:0.85, label:"ACTION"},
+    erreur:    {couleur:"#ff4d5e", ampli:0.45, label:"ERREUR"},
+  };
+  let etat = "veille";
+
+  const racine = document.documentElement;
+  const elEtat = document.getElementById("etat");
+  function appliquerEtat(nom){
+    if (!ETATS[nom]) return;
+    etat = nom;
+    racine.style.setProperty("--accent", ETATS[nom].couleur);
+    elEtat.textContent = ETATS[nom].label;
+  }
+  function accent(){ return getComputedStyle(racine).getPropertyValue("--accent").trim() || "#22e0d6"; }
 
   // --- Journal ---
   const elLog = document.getElementById("log");
   function heure(){ return new Date().toTimeString().slice(0,8); }
-  function loguer(texte, type="sys"){
+  function loguer(texte, genre="sys"){
     const l = document.createElement("div");
-    l.className = "ligne " + type;
+    l.className = "ligne " + genre;
     l.innerHTML = `<span class="horo">${heure()}</span> ${texte}`;
     elLog.appendChild(l);
     while (elLog.children.length > 6) elLog.removeChild(elLog.firstChild);
+  }
+
+  // --- Connexion au backend (WebSocket) avec reconnexion auto ---
+  let ws = null, connecte = false;
+  function connecter(){
+    try{
+      ws = new WebSocket("ws://127.0.0.1:8765");
+    }catch(_){ return; }
+    ws.onopen = () => { connecte = true; loguer("backend connecté ✓","act"); };
+    ws.onmessage = (e) => {
+      let m; try{ m = JSON.parse(e.data); }catch(_){ return; }
+      if (m.type === "etat") appliquerEtat(m.valeur);
+      else if (m.type === "log") loguer(m.texte, m.genre || "sys");
+    };
+    ws.onclose = () => {
+      if (connecte) loguer("backend déconnecté","sys");
+      connecte = false;
+      setTimeout(connecter, 2000);   // on réessaie toutes les 2 s
+    };
+    ws.onerror = () => { try{ ws.close(); }catch(_){} };
   }
 
   // --- Dimensionnement net ---
@@ -31,7 +70,7 @@
   }
   window.addEventListener("resize", redimensionner);
 
-  // --- Onde simulée (l'onde réactive au micro arrivera à l'Étape 4) ---
+  // --- Onde simulée (la vraie onde du micro arrivera à l'Étape 4) ---
   function onde(t){
     for (let i=0;i<N;i++){
       const a = i/N*Math.PI*2;
@@ -44,6 +83,7 @@
     const w = canvas.clientWidth, h = canvas.clientHeight;
     const cx = w/2, cy = h/2, R = Math.min(w,h)/2;
     const col = accent();
+    const ampli = ETATS[etat].ampli;
     ctx.clearRect(0,0,w,h);
     onde(now);
     const rot = reduit ? 0 : now*0.00035;
@@ -78,12 +118,12 @@
     }
     ctx.globalAlpha=1; ctx.restore();
 
-    // onde radiale
+    // onde radiale (énergie selon l'état)
     ctx.save(); ctx.translate(cx,cy); ctx.strokeStyle=col; ctx.lineCap="round";
     const rInt=R*0.46;
     for (let i=0;i<N;i++){
       const a=i/N*Math.PI*2 - Math.PI/2;
-      const len=R*0.05 + donnees[i]*R*0.16;
+      const len=R*0.05 + donnees[i]*R*0.16*ampli;
       ctx.globalAlpha=0.35 + donnees[i]*0.6; ctx.lineWidth=2.4;
       ctx.beginPath();
       ctx.moveTo(Math.cos(a)*rInt, Math.sin(a)*rInt);
@@ -114,8 +154,9 @@
 
   // --- Démarrage ---
   redimensionner();
+  appliquerEtat("veille");
   loguer("démarrage de l'interface HUD…","sys");
-  loguer("cerveau : Ollama (local) — à connecter","sys");
-  loguer("en attente du backend…","sys");
+  loguer("recherche du backend…","sys");
+  connecter();
   requestAnimationFrame(dessiner);
 })();
