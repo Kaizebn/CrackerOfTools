@@ -40,8 +40,23 @@ def _demarrer_voix():
     voix.ecouter(envoyer=serveur.envoyer)
 
 
+def _armer_coupe_tout():
+    """Raccourci d'urgence Ctrl+Alt+K : arrête JARVIS instantanément.
+    (Nécessite parfois de lancer le .bat 'en tant qu'administrateur'.)"""
+    try:
+        import keyboard
+        def arret():
+            print("[COUPE-TOUT] Ctrl+Alt+K — arrêt d'urgence.")
+            os._exit(0)
+        keyboard.add_hotkey("ctrl+alt+k", arret)
+        print("[coupe-tout] armé : Ctrl+Alt+K")
+    except Exception as e:
+        print("[coupe-tout] indisponible (lance en admin pour l'activer) :", e)
+
+
 def main():
     serveur.demarrer_serveur()
+    _armer_coupe_tout()
     threading.Thread(target=_demarrer_voix, daemon=True).start()
 
     pont = Pont()

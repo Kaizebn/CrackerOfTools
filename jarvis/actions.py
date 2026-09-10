@@ -152,3 +152,28 @@ def recherche_web(requete: str) -> str:
         return f"✅ Je cherche « {requete} » sur le web"
     except Exception as e:
         return f"❌ Recherche impossible : {e}"
+
+
+def executer_commande(commande: str) -> str:
+    """Exécute une commande PowerShell arbitraire (Niveau 2).
+    ⚠️ Les garde-fous (liste noire, confirmation) sont vérifiés AVANT
+    l'appel de cette fonction, dans voix.py. Ici on journalise et on exécute."""
+    commande = (commande or "").strip()
+    journaliser(f"COMMANDE: {commande}")
+    if not commande:
+        return "❌ Commande vide"
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", commande],
+            capture_output=True, text=True, timeout=30,
+        )
+        sortie = (r.stdout or "").strip() or (r.stderr or "").strip()
+        if r.returncode == 0:
+            return "✅ " + (sortie[:250] if sortie else "Commande exécutée")
+        return "❌ " + (sortie[:250] if sortie else f"code {r.returncode}")
+    except FileNotFoundError:
+        return "❌ PowerShell introuvable — fonction prévue pour Windows."
+    except subprocess.TimeoutExpired:
+        return "❌ La commande a mis trop de temps (arrêtée)."
+    except Exception as e:
+        return f"❌ Erreur : {e}"

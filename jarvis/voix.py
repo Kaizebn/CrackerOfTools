@@ -22,8 +22,9 @@ except Exception:
     audioop = None
 
 import cerveau
+import securite
 from actions import (ouvrir_app, fermer_app, capture_ecran,
-                     regler_volume, recherche_web)
+                     regler_volume, recherche_web, executer_commande)
 
 ICI = os.path.dirname(os.path.abspath(__file__))
 DOSSIER_MODELES = os.path.join(ICI, "modeles")
@@ -35,6 +36,7 @@ MOT_ACTIVATION = "jarvis"
 
 _moteur = None
 _ollama_prevenu = False
+_cmd_a_confirmer = None      # commande sensible en attente d'un « oui » vocal
 
 
 # ----------------------------------------------------------------------------
@@ -81,6 +83,21 @@ def agir(decision, envoyer=None):
         rep = recherche_web(cible); parler(f"Je cherche {cible}.")
     elif action == "volume":
         rep = regler_volume(cible); parler("C'est réglé.")
+    elif action == "commande":
+        # Niveau 2 : commande système arbitraire, avec garde-fous.
+        global _cmd_a_confirmer
+        cmd = cible or decision.get("commande", "")
+        if securite.est_interdit(cmd):
+            rep = "❌ Commande interdite (sécurité)"
+            parler("Non. Cette commande est interdite pour ta sécurité.")
+        elif securite.est_destructif(cmd):
+            _cmd_a_confirmer = cmd
+            etat("reflexion"); log("confirmation requise : " + cmd, "sys")
+            parler("Attention, c'est une action sensible. Dis oui pour confirmer, ou non pour annuler.")
+            return
+        else:
+            rep = executer_commande(cmd)
+            parler("C'est fait." if rep.startswith("✅") else "Ça n'a pas marché.")
     else:  # repondre
         texte = decision.get("texte", "D'accord.")
         rep = "💬 " + texte; parler(texte)
@@ -153,6 +170,7 @@ def ecouter(envoyer=None):
     """Boucle d'écoute. Dis « Jarvis … » pour donner un ordre,
     ou « Jarvis » seul (il répond « Oui ? ») puis ta demande.
     Dis « au revoir » pour arrêter."""
+    global _cmd_a_confirmer
     try:
         import sounddevice as sd
         import vosk
@@ -200,6 +218,22 @@ def ecouter(envoyer=None):
             if not texte:
                 continue
             print("👂", texte)
+
+            # Une commande sensible attend un « oui » / « non » ?
+            if _cmd_a_confirmer is not None:
+                if any(m in texte for m in ("oui", "confirme", "vas-y", "vas y", "d'accord", "ok")):
+                    rep = executer_commande(_cmd_a_confirmer)
+                    parler("C'est fait." if rep.startswith("✅") else "Ça n'a pas marché.")
+                    if envoyer:
+                        envoyer("log", texte=rep, genre="act" if rep.startswith("✅") else "err")
+                        envoyer("etat", valeur="action" if rep.startswith("✅") else "erreur")
+                else:
+                    parler("D'accord, j'annule.")
+                    if envoyer:
+                        envoyer("log", texte="commande annulée", genre="sys")
+                        envoyer("etat", valeur="veille")
+                _cmd_a_confirmer = None
+                continue
 
             if any(m in texte for m in ("au revoir", "stop jarvis", "arrête-toi", "arrete toi")):
                 parler("Au revoir !")
