@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <title>JARVIS HUD</title>
+</head>
+<body>
+  <div class="hud">
+    <button class="fermer" id="fermer" title="Fermer">✕</button>
+
+    <div class="reacteur">
+      <canvas id="reacteur" aria-label="Réacteur central"></canvas>
+      <div class="coeur">
+        <div class="etat" id="etat">VEILLE</div>
+        <div class="sous">JARVIS · en ligne</div>
+      </div>
+    </div>
+
+    <section class="log-panneau">
+      <div class="titre">JOURNAL</div>
+      <div class="log" id="log"></div>
+    </section>
+
+    <div class="pied">glisse pour déplacer · ✕ pour fermer</div>
+  </div>
+
+  <script src="hud.js"></script>
+</body>
+</html>

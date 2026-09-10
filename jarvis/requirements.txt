@@ -1,3 +1,5 @@
-# Dépendances de l'agent — Étape 1
-# Pillow sert uniquement à la capture d'écran (fonction capture_ecran).
+# Dépendances de l'agent JARVIS
+# Pillow    : capture d'écran (backend, fonction capture_ecran)
+# pywebview : fenêtre transparente du HUD (hud.py)
 Pillow>=10.0
+pywebview>=4.4

@@ -1,0 +1,87 @@
+/* style.css — apparence du HUD (Étape 2).
+   Fond TRANSPARENT : la fenêtre pywebview flotte sur le bureau. */
+
+:root{
+  --cyan:#22e0d6;
+  --cyan-pale:#bff3ef;
+  --orange:#ff8a3c;
+  --rouge:#ff4d5e;
+  --texte:#9fe6e2;
+  --texte-faible:#5b8a8a;
+  --accent:var(--cyan);
+  --ligne:rgba(34,224,214,.20);
+  --panneau:rgba(6,20,26,.55);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:transparent;              /* clé de la transparence */
+  overflow:hidden;
+  color:var(--texte);
+  font-family:"Share Tech Mono",ui-monospace,Consolas,monospace;
+  user-select:none;
+  cursor:default;
+}
+
+.hud{
+  position:relative;
+  height:100%;
+  display:flex; flex-direction:column; align-items:center;
+  padding:14px 14px 8px;
+  gap:10px;
+}
+
+/* Bouton fermer (la fenêtre n'a pas de bordure Windows) */
+.fermer{
+  position:absolute; top:8px; right:10px; z-index:5;
+  width:26px; height:26px; border-radius:50%;
+  background:transparent; color:var(--texte-faible);
+  border:1px solid var(--ligne); cursor:pointer;
+  font-size:13px; line-height:1; transition:all .15s ease;
+}
+.fermer:hover{color:var(--rouge); border-color:var(--rouge)}
+
+/* Réacteur central */
+.reacteur{
+  position:relative; width:340px; height:340px;
+  display:grid; place-items:center;
+  filter:drop-shadow(0 0 22px color-mix(in srgb,var(--accent) 45%, transparent));
+}
+.reacteur canvas{width:100%; height:100%; display:block}
+.coeur{position:absolute; text-align:center; pointer-events:none}
+.coeur .etat{
+  font-family:"Orbitron",sans-serif; font-weight:900;
+  font-size:22px; letter-spacing:3px; color:var(--accent);
+  text-shadow:0 0 16px color-mix(in srgb,var(--accent) 70%, transparent);
+}
+.coeur .sous{font-size:10px; letter-spacing:2px; color:var(--texte-faible); margin-top:4px; text-transform:uppercase}
+
+/* Panneau journal */
+.log-panneau{
+  width:100%; background:var(--panneau);
+  border:1px solid var(--ligne); border-radius:6px; overflow:hidden;
+  backdrop-filter:blur(4px);
+}
+.log-panneau .titre{
+  font-family:"Orbitron",sans-serif; font-weight:700; font-size:10px;
+  letter-spacing:2.5px; color:var(--accent);
+  padding:7px 10px; border-bottom:1px solid var(--ligne);
+}
+.log-panneau .titre::before{content:"▸ "}
+.log{height:120px; overflow:hidden; padding:8px 10px;
+  display:flex; flex-direction:column; justify-content:flex-end; gap:2px;
+  font-size:12px; line-height:1.4}
+.log .ligne{opacity:0; animation:apparait .35s ease forwards}
+.log .horo{color:var(--texte-faible)}
+.log .sys{color:var(--texte-faible)}
+.log .in{color:var(--cyan-pale)}
+.log .act{color:var(--orange)}
+
+.pied{font-size:9px; letter-spacing:1px; color:var(--texte-faible); opacity:.7}
+
+@keyframes apparait{to{opacity:1}}
+
+@media (prefers-reduced-motion:reduce){
+  .log .ligne{animation-duration:.001s}
+}
