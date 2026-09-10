@@ -1,15 +1,13 @@
 """
-voix.py — L'oreille et la voix de JARVIS (Étape 4).
+voix.py — L'oreille et la voix de JARVIS (Étape 4, version complète).
 
-- ÉCOUTE : ton micro -> texte, en LOCAL, avec Vosk (rien ne sort de ton PC).
-- PARLE  : réponses à voix haute avec pyttsx3 (voix de Windows, hors-ligne).
+- ÉCOUTE en continu (Vosk, local). Il faut dire « Jarvis » pour qu'il agisse.
+- COMPREND avec l'IA locale (cerveau.py / Ollama). Repli automatique en
+  "mode simple" (mots-clés) si Ollama n'est pas démarré.
+- PARLE ses réponses (pyttsx3, hors-ligne).
+- Envoie au HUD : l'état, le journal, et le NIVEAU du micro (le cercle bouge).
 
-Au 1er lancement, le petit modèle vocal français (~40 Mo) se télécharge tout
-seul dans le dossier 'modeles/'.
-
-Test tout seul :  python voix.py   (ou double-clic sur lancer_voix.bat)
-Puis parle :  « ouvre le bloc-notes », « prends une capture »,
-              « ferme le bloc-notes », et « au revoir » pour arrêter.
+Test seul :  python voix.py     (sans HUD ; le HUD est branché par jarvis.py)
 """
 
 import os
@@ -18,7 +16,14 @@ import queue
 import zipfile
 import urllib.request
 
-from actions import ouvrir_app, fermer_app, capture_ecran
+try:
+    import audioop            # sert à mesurer le niveau du micro (Python <= 3.12)
+except Exception:
+    audioop = None
+
+import cerveau
+from actions import (ouvrir_app, fermer_app, capture_ecran,
+                     regler_volume, recherche_web)
 
 ICI = os.path.dirname(os.path.abspath(__file__))
 DOSSIER_MODELES = os.path.join(ICI, "modeles")
@@ -26,22 +31,22 @@ NOM_MODELE = "vosk-model-small-fr-0.22"
 URL_MODELE = "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip"
 CHEMIN_MODELE = os.path.join(DOSSIER_MODELES, NOM_MODELE)
 
+MOT_ACTIVATION = "jarvis"
 
-# ----------------------------------------------------------------------------
-#  LA VOIX (synthèse vocale)
-# ----------------------------------------------------------------------------
 _moteur = None
+_ollama_prevenu = False
 
 
+# ----------------------------------------------------------------------------
+#  LA VOIX
+# ----------------------------------------------------------------------------
 def parler(texte):
-    """Dit une phrase à voix haute (et l'affiche aussi dans la console)."""
     global _moteur
     print("🔊 JARVIS :", texte)
     try:
         import pyttsx3
         if _moteur is None:
             _moteur = pyttsx3.init()
-            # On essaie de choisir une voix française si elle existe.
             for v in _moteur.getProperty("voices"):
                 etiquette = (getattr(v, "id", "") + " " + getattr(v, "name", "")).lower()
                 if "fr" in etiquette or "french" in etiquette:
@@ -50,67 +55,35 @@ def parler(texte):
         _moteur.say(texte)
         _moteur.runAndWait()
     except Exception as e:
-        print("[voix] synthèse vocale indisponible :", e)
+        print("[voix] synthèse indisponible :", e)
 
 
 # ----------------------------------------------------------------------------
-#  COMPRENDRE UNE PHRASE (simple, par mots-clés — l'IA Ollama viendra après)
+#  AGIR selon une décision {action: ...} (venue de l'IA ou du mode simple)
 # ----------------------------------------------------------------------------
-APPS_MOTS = {
-    "bloc": "bloc-notes", "notes": "bloc-notes", "notepad": "bloc-notes",
-    "calculatrice": "calculatrice", "calcul": "calculatrice",
-    "paint": "paint", "dessin": "paint",
-    "explorateur": "explorateur", "fichiers": "explorateur",
-}
-
-
-def _trouver_app(phrase):
-    for mot, app in APPS_MOTS.items():
-        if mot in phrase:
-            return app
-    mots = phrase.split()
-    return mots[-1] if mots else ""
-
-
-def executer_phrase(phrase, envoyer=None):
-    """Interprète la phrase entendue, agit, et répond à voix haute.
-    'envoyer' (optionnel) sert à prévenir le HUD (état + journal)."""
-    phrase = phrase.lower().strip()
-    if not phrase:
-        return None
-
+def agir(decision, envoyer=None):
     def etat(v):
-        if envoyer:
-            envoyer("etat", valeur=v)
+        if envoyer: envoyer("etat", valeur=v)
 
     def log(t, g="sys"):
-        if envoyer:
-            envoyer("log", texte=t, genre=g)
+        if envoyer: envoyer("log", texte=t, genre=g)
 
-    log(phrase, "in")
-    etat("reflexion")
+    action = (decision or {}).get("action", "repondre")
+    cible = decision.get("cible", "")
 
-    # Arrêt
-    if any(m in phrase for m in ("au revoir", "stop jarvis", "arrête-toi", "arrete toi")):
-        parler("Au revoir !")
-        etat("veille")
-        return "quitter"
-
-    # Actions
-    if any(m in phrase for m in ("capture", "photo", "écran", "ecran")):
-        rep = capture_ecran()
-        parler("Voilà, j'ai fait une capture d'écran.")
-    elif any(m in phrase for m in ("ouvre", "ouvrir", "lance", "démarre", "demarre")):
-        app = _trouver_app(phrase)
-        rep = ouvrir_app(app)
-        parler(f"J'ouvre {app}." if rep.startswith("✅") else f"Je n'ai pas réussi à ouvrir {app}.")
-    elif any(m in phrase for m in ("ferme", "fermer", "arrête", "arrete")):
-        app = _trouver_app(phrase)
-        rep = fermer_app(app)
-        parler(f"Je ferme {app}." if rep.startswith("✅") else f"Je n'ai pas trouvé {app} à fermer.")
-    else:
-        rep = f"non compris : {phrase}"
-        parler("Je n'ai pas compris. Tu peux répéter ?")
+    if action == "ouvrir":
+        rep = ouvrir_app(cible); parler(f"J'ouvre {cible}." if rep.startswith("✅") else f"Je n'ai pas réussi à ouvrir {cible}.")
+    elif action == "fermer":
+        rep = fermer_app(cible); parler(f"Je ferme {cible}." if rep.startswith("✅") else f"Je n'ai pas trouvé {cible}.")
+    elif action == "capture":
+        rep = capture_ecran(); parler("Voilà, capture faite.")
+    elif action == "web":
+        rep = recherche_web(cible); parler(f"Je cherche {cible}.")
+    elif action == "volume":
+        rep = regler_volume(cible); parler("C'est réglé.")
+    else:  # repondre
+        texte = decision.get("texte", "D'accord.")
+        rep = "💬 " + texte; parler(texte)
 
     if rep.startswith("✅"):
         etat("action"); log(rep, "act")
@@ -118,11 +91,51 @@ def executer_phrase(phrase, envoyer=None):
         etat("erreur"); log(rep, "err")
     else:
         etat("veille"); log(rep, "sys")
-    return None
+
+
+def _comprendre_simple(commande):
+    """Mode de secours par mots-clés, si l'IA n'est pas disponible."""
+    c = commande.lower()
+    if any(m in c for m in ("capture", "photo", "écran", "ecran")):
+        return {"action": "capture"}
+    if any(m in c for m in ("cherche", "recherche", "google")):
+        return {"action": "web", "cible": commande}
+    if "volume" in c or "son" in c:
+        cible = "muet" if "muet" in c or "coupe" in c else ("-" if any(m in c for m in ("baisse", "moins")) else "+")
+        return {"action": "volume", "cible": cible}
+    if any(m in c for m in ("ouvre", "ouvrir", "lance", "démarre", "demarre")):
+        return {"action": "ouvrir", "cible": _dernier_mot(c, ("ouvre", "ouvrir", "lance", "démarre", "demarre", "le", "la", "les", "moi"))}
+    if any(m in c for m in ("ferme", "fermer", "quitte")):
+        return {"action": "fermer", "cible": _dernier_mot(c, ("ferme", "fermer", "quitte", "le", "la", "les", "moi"))}
+    return {"action": "repondre", "texte": "Je n'ai pas compris, tu peux répéter ?"}
+
+
+def _dernier_mot(phrase, a_retirer):
+    mots = [m for m in phrase.split() if m not in a_retirer]
+    return mots[-1] if mots else ""
+
+
+def traiter(commande, envoyer=None):
+    """Comprend la commande (IA d'abord, sinon mode simple) puis agit."""
+    global _ollama_prevenu
+    commande = commande.strip()
+    if not commande:
+        return
+    if envoyer:
+        envoyer("log", texte=commande, genre="in")
+        envoyer("etat", valeur="reflexion")
+    try:
+        decision = cerveau.decider(commande)
+    except Exception:
+        if not _ollama_prevenu:
+            parler("L'intelligence artificielle n'est pas démarrée. Je passe en mode simple.")
+            _ollama_prevenu = True
+        decision = _comprendre_simple(commande)
+    agir(decision, envoyer)
 
 
 # ----------------------------------------------------------------------------
-#  ÉCOUTER (micro -> texte, en continu)
+#  ÉCOUTER (avec mot d'activation « Jarvis »)
 # ----------------------------------------------------------------------------
 def _telecharger_modele():
     os.makedirs(DOSSIER_MODELES, exist_ok=True)
@@ -137,8 +150,9 @@ def _telecharger_modele():
 
 
 def ecouter(envoyer=None):
-    """Ouvre le micro et écoute en continu. Pour chaque phrase reconnue,
-    appelle executer_phrase(). Dis « au revoir » pour arrêter."""
+    """Boucle d'écoute. Dis « Jarvis … » pour donner un ordre,
+    ou « Jarvis » seul (il répond « Oui ? ») puis ta demande.
+    Dis « au revoir » pour arrêter."""
     try:
         import sounddevice as sd
         import vosk
@@ -162,22 +176,50 @@ def ecouter(envoyer=None):
         fifo.put(bytes(indata))
 
     if envoyer:
-        envoyer("etat", valeur="ecoute")
-    parler("Bonjour, je t'écoute.")
-    print("🎙️  Parle ! (dis « au revoir » pour arrêter)")
+        envoyer("etat", valeur="veille")
+    if cerveau.ollama_dispo():
+        parler("Bonjour. Dis Jarvis pour me parler.")
+    else:
+        parler("Bonjour. L'IA n'est pas démarrée, je fonctionne en mode simple. Dis Jarvis pour me parler.")
+    print("🎙️  En écoute. Dis « Jarvis … » (au revoir pour arrêter)")
 
-    with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype="int16",
+    attend_commande = False
+    with sd.RawInputStream(samplerate=16000, blocksize=4000, dtype="int16",
                            channels=1, callback=_capter):
         while True:
             donnees = fifo.get()
-            if reconnaisseur.AcceptWaveform(donnees):
-                res = json.loads(reconnaisseur.Result())
-                texte = res.get("text", "").strip()
-                if texte:
-                    if executer_phrase(texte, envoyer) == "quitter":
-                        break
-                    if envoyer:
-                        envoyer("etat", valeur="ecoute")
+
+            # niveau du micro -> le cercle du HUD bouge
+            if envoyer and audioop is not None:
+                niveau = min(1.0, audioop.rms(donnees, 2) / 8000.0)
+                envoyer("niveau", valeur=round(niveau, 3))
+
+            if not reconnaisseur.AcceptWaveform(donnees):
+                continue
+            texte = json.loads(reconnaisseur.Result()).get("text", "").strip().lower()
+            if not texte:
+                continue
+            print("👂", texte)
+
+            if any(m in texte for m in ("au revoir", "stop jarvis", "arrête-toi", "arrete toi")):
+                parler("Au revoir !")
+                if envoyer: envoyer("etat", valeur="veille")
+                break
+
+            if MOT_ACTIVATION in texte:
+                if envoyer: envoyer("etat", valeur="ecoute")
+                reste = texte.replace(MOT_ACTIVATION, "").strip(" ,.")
+                if reste:
+                    traiter(reste, envoyer)
+                else:
+                    parler("Oui ?")
+                    attend_commande = True
+                if envoyer: envoyer("etat", valeur="veille")
+            elif attend_commande:
+                traiter(texte, envoyer)
+                attend_commande = False
+                if envoyer: envoyer("etat", valeur="veille")
+            # sinon : entendu mais pas adressé à Jarvis -> on ignore
 
 
 if __name__ == "__main__":

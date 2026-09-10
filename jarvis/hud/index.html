@@ -9,24 +9,41 @@
   <title>JARVIS HUD</title>
 </head>
 <body>
-  <div class="hud">
-    <button class="fermer" id="fermer" title="Fermer">✕</button>
+  <div class="scene">
+    <header class="entete">
+      <div>
+        <div class="titre-appli">J.A.R.V.I.S</div>
+        <div class="sous-titre">dis « Jarvis » pour parler</div>
+      </div>
+      <button class="fermer" id="fermer" title="Fermer">✕</button>
+    </header>
 
-    <div class="reacteur">
-      <canvas id="reacteur" aria-label="Réacteur central"></canvas>
-      <div class="coeur">
-        <div class="etat" id="etat">VEILLE</div>
-        <div class="sous">JARVIS · en ligne</div>
+    <div class="centre">
+      <div class="reacteur">
+        <canvas id="reacteur" aria-label="Réacteur central"></canvas>
+        <div class="coeur">
+          <div class="etat" id="etat">VEILLE</div>
+          <div class="sous" id="sous">en ligne</div>
+        </div>
       </div>
     </div>
 
-    <section class="log-panneau">
-      <div class="titre">JOURNAL</div>
-      <div class="log" id="log"></div>
-    </section>
-
-    <div class="pied">glisse pour déplacer · ✕ pour fermer</div>
+    <footer class="bas">
+      <section class="log-panneau">
+        <div class="titre">JOURNAL</div>
+        <div class="log" id="log"></div>
+      </section>
+      <div class="aide">
+        Essaie : <b>« Jarvis, ouvre Roblox »</b><br>
+        <b>« Jarvis, monte le son »</b><br>
+        <b>« Jarvis, cherche la météo »</b><br>
+        « au revoir » pour arrêter
+      </div>
+    </footer>
   </div>
+
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
 
   <script src="hud.js"></script>
 </body>

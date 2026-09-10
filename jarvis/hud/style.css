@@ -1,87 +1,111 @@
-/* style.css — apparence du HUD (Étape 2).
-   Fond TRANSPARENT : la fenêtre pywebview flotte sur le bureau. */
+/* style.css — HUD plein écran, thème ROUGE (Étape 4).
+   Fond sombre opaque (plein écran) ; le cercle réagit à la voix. */
 
 :root{
-  --cyan:#22e0d6;
-  --cyan-pale:#bff3ef;
-  --orange:#ff8a3c;
-  --rouge:#ff4d5e;
-  --texte:#9fe6e2;
-  --texte-faible:#5b8a8a;
-  --accent:var(--cyan);
-  --ligne:rgba(34,224,214,.20);
-  --panneau:rgba(6,20,26,.55);
+  --fond-1:#0b0304;
+  --fond-2:#160406;
+  --rouge:#ff2a3a;
+  --rouge-clair:#ff6b74;
+  --rouge-sombre:#4a0a10;
+  --ambre:#ffb03a;
+  --texte:#ffc2c6;
+  --texte-faible:#9a5a60;
+  --accent:var(--rouge);            /* piloté par l'état (JS) */
+  --ligne:rgba(255,42,58,.22);
+  --panneau:rgba(22,4,6,.55);
+  color-scheme:dark;
 }
 
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{
-  background:transparent;              /* clé de la transparence */
-  overflow:hidden;
+  background:
+    radial-gradient(90% 70% at 50% 40%, #1a0507 0%, var(--fond-1) 70%),
+    var(--fond-1);
   color:var(--texte);
   font-family:"Share Tech Mono",ui-monospace,Consolas,monospace;
+  overflow:hidden;
   user-select:none;
-  cursor:default;
 }
 
-.hud{
-  position:relative;
-  height:100%;
-  display:flex; flex-direction:column; align-items:center;
-  padding:14px 14px 8px;
+.scene{
+  position:relative; height:100%;
+  display:flex; flex-direction:column;
+  padding:18px clamp(16px,4vw,48px);
   gap:10px;
 }
 
-/* Bouton fermer (la fenêtre n'a pas de bordure Windows) */
-.fermer{
-  position:absolute; top:8px; right:10px; z-index:5;
-  width:26px; height:26px; border-radius:50%;
-  background:transparent; color:var(--texte-faible);
-  border:1px solid var(--ligne); cursor:pointer;
-  font-size:13px; line-height:1; transition:all .15s ease;
+/* En-tête */
+.entete{display:flex; align-items:center; gap:16px}
+.titre-appli{
+  font-family:"Orbitron",sans-serif; font-weight:900;
+  font-size:clamp(20px,3vw,30px); letter-spacing:8px; color:var(--accent);
+  text-shadow:0 0 20px color-mix(in srgb,var(--accent) 65%, transparent);
+  transition:color .4s ease, text-shadow .4s ease;
 }
-.fermer:hover{color:var(--rouge); border-color:var(--rouge)}
+.sous-titre{font-size:12px; letter-spacing:2px; color:var(--texte-faible); text-transform:uppercase}
+.entete .fermer{
+  margin-left:auto; width:34px; height:34px; border-radius:50%;
+  background:transparent; color:var(--texte-faible); border:1px solid var(--ligne);
+  cursor:pointer; font-size:15px; transition:all .15s ease;
+}
+.entete .fermer:hover{color:var(--rouge-clair); border-color:var(--rouge-clair)}
 
-/* Réacteur central */
+/* Zone centrale : le réacteur */
+.centre{flex:1; display:grid; place-items:center; min-height:0}
 .reacteur{
-  position:relative; width:340px; height:340px;
+  position:relative; width:min(62vmin,560px); aspect-ratio:1/1;
   display:grid; place-items:center;
-  filter:drop-shadow(0 0 22px color-mix(in srgb,var(--accent) 45%, transparent));
+  filter:drop-shadow(0 0 34px color-mix(in srgb,var(--accent) 45%, transparent));
 }
 .reacteur canvas{width:100%; height:100%; display:block}
 .coeur{position:absolute; text-align:center; pointer-events:none}
 .coeur .etat{
   font-family:"Orbitron",sans-serif; font-weight:900;
-  font-size:22px; letter-spacing:3px; color:var(--accent);
-  text-shadow:0 0 16px color-mix(in srgb,var(--accent) 70%, transparent);
+  font-size:clamp(22px,3.4vw,30px); letter-spacing:4px; color:var(--accent);
+  text-shadow:0 0 20px color-mix(in srgb,var(--accent) 70%, transparent);
+  transition:color .4s ease;
 }
-.coeur .sous{font-size:10px; letter-spacing:2px; color:var(--texte-faible); margin-top:4px; text-transform:uppercase}
+.coeur .sous{font-size:11px; letter-spacing:2px; color:var(--texte-faible); margin-top:6px; text-transform:uppercase}
 
-/* Panneau journal */
+/* Bas de page : journal + aide */
+.bas{display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap}
 .log-panneau{
-  width:100%; background:var(--panneau);
-  border:1px solid var(--ligne); border-radius:6px; overflow:hidden;
-  backdrop-filter:blur(4px);
+  flex:1 1 320px; min-width:260px;
+  background:var(--panneau); border:1px solid var(--ligne); border-radius:8px;
+  overflow:hidden; backdrop-filter:blur(4px);
 }
 .log-panneau .titre{
   font-family:"Orbitron",sans-serif; font-weight:700; font-size:10px;
-  letter-spacing:2.5px; color:var(--accent);
-  padding:7px 10px; border-bottom:1px solid var(--ligne);
+  letter-spacing:2.5px; color:var(--accent); padding:8px 12px;
+  border-bottom:1px solid var(--ligne);
 }
 .log-panneau .titre::before{content:"▸ "}
-.log{height:120px; overflow:hidden; padding:8px 10px;
+.log{height:120px; overflow:hidden; padding:9px 12px;
   display:flex; flex-direction:column; justify-content:flex-end; gap:2px;
-  font-size:12px; line-height:1.4}
-.log .ligne{opacity:0; animation:apparait .35s ease forwards}
+  font-size:12.5px; line-height:1.45}
+.log .ligne{opacity:0; animation:apparait .3s ease forwards}
 .log .horo{color:var(--texte-faible)}
 .log .sys{color:var(--texte-faible)}
-.log .in{color:var(--cyan-pale)}
-.log .act{color:var(--orange)}
+.log .in{color:var(--rouge-clair)}
+.log .act{color:var(--ambre)}
+.log .err{color:#ff5566}
 
-.pied{font-size:9px; letter-spacing:1px; color:var(--texte-faible); opacity:.7}
+.aide{
+  flex:0 0 auto; font-size:12px; color:var(--texte-faible);
+  padding:10px 14px; border:1px solid var(--ligne); border-radius:8px;
+  background:var(--panneau); line-height:1.6;
+}
+.aide b{color:var(--accent); font-weight:400}
+
+/* Overlays */
+.scanlines{
+  position:fixed; inset:0; pointer-events:none; z-index:8; opacity:.5;
+  background:repeating-linear-gradient(to bottom, rgba(255,255,255,.035) 0 1px, transparent 1px 3px);
+}
+.vignette{position:fixed; inset:0; pointer-events:none; z-index:7;
+  box-shadow:inset 0 0 260px 50px rgba(0,0,0,.8)}
 
 @keyframes apparait{to{opacity:1}}
-
-@media (prefers-reduced-motion:reduce){
-  .log .ligne{animation-duration:.001s}
-}
+@media (prefers-reduced-motion:reduce){ .log .ligne{animation-duration:.001s} }
+@media (max-width:640px){ .aide{display:none} }
