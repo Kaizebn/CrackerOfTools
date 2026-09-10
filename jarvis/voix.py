@@ -14,6 +14,7 @@ import time
 import json
 import queue
 import zipfile
+import tempfile
 import subprocess
 import urllib.request
 
@@ -29,9 +30,15 @@ from actions import (ouvrir_app, fermer_app, capture_ecran,
 
 ICI = os.path.dirname(os.path.abspath(__file__))
 DOSSIER_MODELES = os.path.join(ICI, "modeles")
-NOM_MODELE = "vosk-model-small-fr-0.22"
-URL_MODELE = "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip"
+# Grand modèle français = bien plus précis (~1,4 Go). L'ancien petit modèle
+# comprenait "la moitié des mots" ; celui-ci comprend beaucoup mieux.
+NOM_MODELE = "vosk-model-fr-0.22"
+URL_MODELE = "https://alphacephei.com/vosk/models/vosk-model-fr-0.22.zip"
 CHEMIN_MODELE = os.path.join(DOSSIER_MODELES, NOM_MODELE)
+
+# Voix neuronale (naturelle) pour les réponses. Nécessite internet ;
+# repli automatique sur la voix Windows hors-ligne si pas de connexion.
+VOIX_EDGE = "fr-FR-HenriNeural"
 
 # On accepte plusieurs façons dont Vosk peut entendre « Jarvis ».
 MOTS_REVEIL = ("jarvis", "jarvisse", "jarvi", "jervis", "charvis", "djarvis", "arvis", "gervais")
@@ -48,8 +55,45 @@ _cmd_a_confirmer = None
 #  LA VOIX (avec repli sur la voix Windows)
 # ----------------------------------------------------------------------------
 def parler(texte):
+    """Dit une phrase. On essaie, dans l'ordre :
+    1. une belle voix neuronale (edge-tts, nécessite internet),
+    2. la voix pyttsx3, 3. la voix Windows (System.Speech). Toujours un son."""
     print("🔊 JARVIS :", texte)
-    # 1) pyttsx3
+    if _parler_edge(texte):
+        return
+    if _parler_pyttsx3(texte):
+        return
+    _parler_sapi(texte)
+
+
+def _jouer_mp3(chemin):
+    """Joue un fichier audio et attend la fin (via MCI, intégré à Windows)."""
+    import ctypes
+    envoyer = ctypes.windll.winmm.mciSendStringW
+    envoyer(f'open "{chemin}" type mpegvideo alias jv', None, 0, 0)
+    envoyer('play jv wait', None, 0, 0)
+    envoyer('close jv', None, 0, 0)
+
+
+def _parler_edge(texte):
+    """Belle voix neuronale française (edge-tts). Nécessite internet."""
+    try:
+        import asyncio
+        import edge_tts
+        chemin = os.path.join(tempfile.gettempdir(), "jarvis_voix.mp3")
+
+        async def _synth():
+            await edge_tts.Communicate(texte, VOIX_EDGE).save(chemin)
+
+        asyncio.run(_synth())
+        _jouer_mp3(chemin)
+        return True
+    except Exception as e:
+        print("[voix] voix neuronale indisponible (hors-ligne ?) :", e)
+        return False
+
+
+def _parler_pyttsx3(texte):
     global _moteur
     try:
         import pyttsx3
@@ -61,10 +105,13 @@ def parler(texte):
                     break
         _moteur.say(texte)
         _moteur.runAndWait()
-        return
+        return True
     except Exception as e:
-        print("[voix] pyttsx3 indisponible, essai de la voix Windows :", e)
-    # 2) Repli : voix de Windows via PowerShell (marche sans rien installer)
+        print("[voix] pyttsx3 indisponible :", e)
+        return False
+
+
+def _parler_sapi(texte):
     try:
         sur = texte.replace("'", " ").replace('"', " ")
         subprocess.run(

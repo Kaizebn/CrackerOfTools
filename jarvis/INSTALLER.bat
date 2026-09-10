@@ -44,7 +44,8 @@ echo [4/5] Telechargement du cerveau (modele Llama ~2 Go)... patiente.
 ollama pull llama3.2:3b
 echo.
 
-echo [5/5] Telechargement de l'oreille (modele vocal francais ~40 Mo)...
+echo [5/5] Telechargement de l'oreille (grand modele vocal francais ~1.4 Go)...
+echo    (c'est ce qui permet de bien te comprendre - patiente)
 python -c "import os,voix; print('deja present') if os.path.isdir(voix.CHEMIN_MODELE) else voix._telecharger_modele()"
 echo.
 
