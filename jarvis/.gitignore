@@ -1,0 +1,26 @@
+# Secrets et environnement
+.env
+
+# Environnements virtuels
+.venv/
+venv/
+
+# Données runtime
+data/
+logs/
+*.jsonl
+
+# Caches Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Artefacts de build
+build/
+dist/
+*.egg-info/
+
+# Modèles téléchargés (wake word, whisper, piper…)
+models/
