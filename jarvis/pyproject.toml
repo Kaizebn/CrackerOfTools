@@ -4,23 +4,57 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jarvis"
-version = "0.0.0"
+version = "0.1.0"
 description = "JARVIS — assistant IA vocal pour Windows"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic==2.9.2",
-    "pydantic-settings==2.5.2",
-    "structlog==24.4.0",
-    "colorama==0.4.6",
+    # Fondations
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "structlog>=24.4",
+    "colorama>=0.4.6",
+    # Cerveau
+    "anthropic>=0.39",
+    # Réseau / domotique / web
+    "aiohttp>=3.10",
+    "trafilatura>=1.12",
+    "ddgs>=9.0",
+    "tavily-python>=0.5",
+    # Mémoire
+    "sqlalchemy>=2.0",
+    "chromadb>=0.5",
+    "sentence-transformers>=3.0",
+    # Audio / voix
+    "numpy>=1.26,<2.3",
+    "sounddevice>=0.5",
+    "faster-whisper>=1.0",
+    "openwakeword>=0.6",
+    "silero-vad>=5.1",
+    "piper-tts>=1.2",
+    # Système
+    "psutil>=6.0",
+    "pyautogui>=0.9.54",
+    "screen-brightness-control>=0.24",
+    "pynput>=1.7",
+    # Interface
+    "PySide6>=6.7",
+    "qasync>=0.27",
+    # Dépendances spécifiques Windows
+    "pycaw>=20240210; sys_platform == 'win32'",
+    "comtypes>=1.4; sys_platform == 'win32'",
+    "windows-toasts>=1.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest==8.3.3",
-    "pytest-asyncio==0.24.0",
-    "mypy==1.11.2",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
 ]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jarvis"]
@@ -37,20 +71,30 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src"
 files = ["src", "tests"]
 
-# Les libs tierces ci-dessous n'exposent pas de stubs ; on coupe l'erreur
-# d'import manquant sur elles, sans relâcher la rigueur sur notre propre code.
-# Elles seront réellement importées à partir des phases suivantes.
+# Libs tierces sans stubs ou non installables hors Windows/GPU : on coupe l'erreur
+# d'import manquant, sans relâcher la rigueur sur notre propre code.
 [[tool.mypy.overrides]]
 module = [
     "sounddevice.*",
     "pyautogui.*",
     "pycaw.*",
+    "comtypes.*",
     "screen_brightness_control.*",
     "piper.*",
     "openwakeword.*",
+    "pvporcupine.*",
+    "silero_vad.*",
+    "faster_whisper.*",
+    "torch.*",
     "chromadb.*",
     "sentence_transformers.*",
     "trafilatura.*",
     "ddgs.*",
+    "tavily.*",
+    "psutil.*",
+    "pynput.*",
+    "qasync.*",
+    "windows_toasts.*",
+    "PySide6.*",
 ]
 ignore_missing_imports = true

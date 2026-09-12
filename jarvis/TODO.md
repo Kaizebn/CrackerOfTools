@@ -1,57 +1,48 @@
 # TODO — JARVIS
 
-Suivi de l'avancement, tenu à jour à chaque phase.
+Légende : ✅ fait & testé (Linux headless) · 🪟 implémenté, à valider sur Windows réel.
 
 ## Phase 0 — Fondations ✅
-- [x] Structure du repo (src-layout, `src/jarvis/`, `tests/`).
-- [x] `config.py` — pydantic-settings, chargé une fois, `.env` + préfixe `JARVIS_`.
-- [x] `events.py` — dataclasses d'événements + `EventBus` (pub/sub typé, backpressure).
-- [x] `state.py` — machine à états `IDLE/LISTENING/THINKING/SPEAKING/ERROR`.
-- [x] `logging_config.py` — structlog → console colorée + fichier JSON rotatif.
-- [x] `.env.example`, `.gitignore`, `pyproject.toml`, `requirements.txt` figé.
-- [x] `run.py` — démo des fondations lançable.
-- [x] `README.md` — installation Windows pas à pas.
-- [x] Tests : bus d'événements, machine à états, configuration.
-- [x] `mypy --strict src/` passe.
+- [x] Structure src-layout, `config.py`, `events.py` (EventBus), `state.py`, logs structlog.
+- [x] `.env.example`, `.gitignore`, `pyproject.toml`, `requirements.txt`, tests, `mypy --strict`.
 
-## Phase 1 — Boucle vocale nue
-- [ ] `audio/input.py` — stream micro 16 kHz mono (sounddevice).
-- [ ] `audio/wake.py` — openWakeWord (backend onnxruntime), fallback Porcupine.
-- [ ] `audio/vad.py` — silero-vad (détection de fin de phrase).
-- [ ] `stt/whisper.py` — faster-whisper (détection auto cuda/cpu).
-- [ ] `tts/base.py` + `tts/piper.py` — lecture d'une réponse en dur.
-- [ ] `audio/output.py` — playback + file d'attente TTS.
-- [ ] Orchestrateur minimal câblant wake → VAD → STT → console → Piper.
-- [ ] Jalon : « Hey Jarvis, bonjour » → réponse vocale, de façon fiable.
+## Phase 1 — Boucle vocale nue 🪟
+- [x] `audio/input.py` (micro 16 kHz), `audio/wake.py` (openWakeWord + fallback Porcupine).
+- [x] `audio/vad.py` (silero endpointing), `stt/whisper.py` (faster-whisper, device auto).
+- [x] `tts/{base,piper,elevenlabs}.py`, `audio/output.py` (playback + file, interruptible).
+- [x] `pipeline.py` : wake → VAD → STT → console + orchestrateur.
+- [ ] À valider sur Windows : micro réel, modèles téléchargés, latence.
 
-## Phase 2 — Cerveau
-- [ ] `llm/base.py` — abstraction `LLMProvider` (streaming).
-- [ ] `llm/anthropic.py` — Claude en streaming.
-- [ ] `llm/prompts.py` — system prompt soigné.
-- [ ] Historique en mémoire vive + TTS phrase par phrase pendant la génération.
+## Phase 2 — Cerveau ✅
+- [x] `llm/base.py` (abstraction + messages neutres), `llm/anthropic.py` (streaming + tool use).
+- [x] `llm/prompts.py` (personnalité + contexte injecté).
+- [x] Historique multi-tours, TTS phrase par phrase (`text.SentenceSplitter`). Testé via mock LLM.
 
-## Phase 3 — Outils
-- [ ] `tools/registry.py` — `@tool`, schéma généré depuis Pydantic, niveaux de risque.
-- [ ] Boucle tool_use ↔ tool_result.
-- [ ] `tools/system.py`, `tools/web.py`, `tools/timers.py`.
-- [ ] Confirmation des actions risquées + journalisation SQLite + `--dry-run`.
+## Phase 3 — Outils ✅
+- [x] `tools/registry.py` : `@tool`, schéma Pydantic, risques, dry-run, journalisation.
+- [x] Boucle tool_use ↔ tool_result (orchestrateur). Testée de bout en bout.
+- [x] `tools/system.py`, `tools/web.py`, `tools/timers.py`.
+- [x] Confirmation des actions risquées (vocale + console + auto), testée.
 
-## Phase 4 — Mémoire
-- [ ] `memory/db.py` (SQLAlchemy), `memory/vector.py` (ChromaDB), `memory/manager.py`.
-- [ ] Injection de contexte + extraction de faits en arrière-plan (Haiku) + résumés.
-- [ ] `tools/memory_tools.py`.
+## Phase 4 — Mémoire ✅
+- [x] `memory/db.py` (SQLAlchemy), `memory/vector.py` (ChromaDB), `memory/manager.py`.
+- [x] Injection de contexte, extraction de faits en arrière-plan (Haiku), repli sans ChromaDB.
+- [x] `tools/memory_tools.py` (remember / recall / forget). DB testée.
 
-## Phase 5 — Domotique + fichiers
-- [ ] `tools/home.py` — Home Assistant (REST + WebSocket), cache des entités.
-- [ ] `tools/files.py` — opérations sandboxées (ALLOWED_PATHS).
+## Phase 5 — Domotique + fichiers 🪟
+- [x] `tools/home.py` : REST + WebSocket temps réel, cache + résolution d'entités (résolution testée).
+- [x] `tools/files.py` : opérations sandboxées (ALLOWED_PATHS), testées.
+- [ ] À valider sur Windows : instance Home Assistant réelle.
 
-## Phase 6 — Interface
-- [ ] `ui/tray.py` — icône barre système.
-- [ ] `ui/hud.py` — overlay animé (QPainter, 60 fps).
-- [ ] Intégration qasync, raccourci global Ctrl+Alt+J, barge-in.
+## Phase 6 — Interface 🪟
+- [x] `ui/tray.py` (barre système), `ui/hud.py` (overlay animé QPainter), `ui/bridge.py`.
+- [x] Intégration `qasync`, raccourci global `Ctrl+Alt+J`, interruption `Échap`.
+- [ ] Barge-in vocal « par-dessus » : nécessite AEC (limite documentée).
+- [ ] À valider sur Windows : rendu HUD, tray, raccourcis.
 
 ## Phase 7 — Finition
-- [ ] Démarrage automatique avec Windows.
+- [x] Robustesse : erreurs LLM/outils/réseau → message vocal calme + retour IDLE (pas de crash).
+- [x] Modes `--text`, `--no-ui`, `--dry-run`.
+- [ ] Démarrage automatique avec Windows (tâche planifiée / raccourci Démarrage).
 - [ ] Packaging PyInstaller (.exe).
-- [ ] Robustesse (réseau coupé, micro débranché, API en erreur → retour IDLE).
-- [ ] README final avec captures.
+- [ ] Captures d'écran du HUD dans le README.

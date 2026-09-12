@@ -1,11 +1,53 @@
-# Dépendances figées — Phase 0 (fondations).
-# La liste s'étoffera phase par phase (audio, STT, TTS, LLM, mémoire, UI…).
+# Dépendances de JARVIS.
+#
+# Les versions du NOYAU (cerveau + fondations) sont épinglées exactement : ce sont
+# celles validées (tests + mypy). Les briques AUDIO / ML / UI utilisent une borne
+# minimale : elles dépendent de ta plateforme (GPU, Qt) et n'ont pas pu être installées
+# dans l'environnement de développement Linux headless. Si une version pose problème,
+# ajuste-la (voir README, section « Dépannage »).
+
+# --- Noyau (épinglé, validé) ---
 pydantic==2.9.2
 pydantic-settings==2.5.2
 structlog==24.4.0
 colorama==0.4.6
+anthropic==1.5.0
+aiohttp==3.14.3
+SQLAlchemy==2.0.52
+numpy==2.2.6
 
-# Outils de développement
+# --- Web ---
+trafilatura>=1.12
+ddgs>=9.0
+tavily-python>=0.5
+
+# --- Mémoire vectorielle ---
+chromadb>=0.5
+sentence-transformers>=3.0
+
+# --- Audio / voix ---
+sounddevice>=0.5
+faster-whisper>=1.0
+openwakeword>=0.6
+silero-vad>=5.1
+piper-tts>=1.2
+
+# --- Système ---
+psutil>=6.0
+pyautogui>=0.9.54
+screen-brightness-control>=0.24
+pynput>=1.7
+
+# --- Interface ---
+PySide6>=6.7
+qasync>=0.27
+
+# --- Windows uniquement ---
+pycaw>=20240210; sys_platform == "win32"
+comtypes>=1.4; sys_platform == "win32"
+windows-toasts>=1.1; sys_platform == "win32"
+
+# --- Développement ---
 pytest==8.3.3
 pytest-asyncio==0.24.0
 mypy==1.11.2

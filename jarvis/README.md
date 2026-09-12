@@ -1,56 +1,48 @@
 # JARVIS — assistant IA vocal pour Windows
 
-Un assistant personnel de type JARVIS : un daemon qui tourne en permanence sur un PC
-Windows 11, se réveille au mot-clé « Hey Jarvis », comprend ce qu'on lui dit, agit sur
-la machine / le web / la domotique, et répond à voix haute.
+Un assistant personnel de type JARVIS : un daemon qui tourne en permanence sur Windows 11,
+se réveille au mot-clé « Hey Jarvis », comprend ce qu'on lui dit, agit sur la machine /
+le web / la domotique, et répond à voix haute — avec une personnalité posée et efficace.
 
-Le projet est construit **phase par phase** : chaque phase se termine par quelque chose
-de lançable et testable. Cette version couvre la **Phase 0 — Fondations**.
+Pipeline événementiel, streaming de bout en bout (LLM → TTS phrase par phrase), outils
+sous politique de sécurité (SAFE / CONFIRM), mémoire persistante, HUD animé.
 
 ---
 
-## État d'avancement
+## En un coup d'œil
 
-- [x] **Phase 0 — Fondations** : structure, config, bus d'événements, machine à états, logs, tests.
-- [ ] Phase 1 — Boucle vocale nue (micro → wake word → VAD → Whisper → Piper).
-- [ ] Phase 2 — Cerveau (Claude en streaming).
-- [ ] Phase 3 — Outils (système, web, minuteurs) + confirmations.
-- [ ] Phase 4 — Mémoire (SQLite + ChromaDB).
-- [ ] Phase 5 — Domotique + fichiers.
-- [ ] Phase 6 — Interface (tray + HUD) + barge-in.
-- [ ] Phase 7 — Finition (démarrage auto, packaging, robustesse).
+```
+Micro → WakeWord → VAD → Whisper → Orchestrateur ⇄ Mémoire (SQLite + ChromaDB)
+                                        │ tool_use
+                                        ▼
+                                   ToolRegistry → système / fichiers / web / domotique / mémoire / minuteurs
+                                        │
+                                        ▼
+                                   TTS (Piper/ElevenLabs) → Haut-parleurs → HUD
+```
 
-Voir [`TODO.md`](TODO.md) pour le détail.
+- **Cerveau** : Claude en streaming + tool use, derrière une abstraction `LLMProvider`.
+- **Voix** : openWakeWord → silero-VAD → faster-whisper (CUDA auto) → Piper (offline).
+- **Outils** : apps, volume, luminosité, captures, média, énergie, commandes (allowlist),
+  fichiers sandboxés, recherche web + météo + actus, Home Assistant, mémoire, minuteurs/rappels.
+- **Sécurité** : actions risquées confirmées à la voix **et** au HUD, mode `--dry-run`,
+  journal des appels d'outils en SQLite.
+- **Interface** : icône de barre système + overlay « arc-réacteur » animé (QPainter, 60 fps).
 
 ---
 
 ## Prérequis
 
-- **Windows 11 x64** (le code tourne nativement, pas via WSL).
-- **Python 3.11 ou plus récent** — à l'installation, cocher *« Add python.exe to PATH »*.
-- **GPU NVIDIA** recommandé pour la latence (faster-whisper en CUDA, à partir de la
-  Phase 1). Sans GPU, tout fonctionne sur CPU mais la réponse est plus lente.
-
-> La Phase 0 n'a **aucune** dépendance Windows ni GPU : elle s'installe et se teste sur
-> n'importe quel OS. Les briques audio/GPU arrivent en Phase 1.
+- **Windows 11 x64**, **Python 3.11+** (cocher *« Add python.exe to PATH »* à l'installation).
+- **GPU NVIDIA** recommandé (Whisper en CUDA → réponse < 1,5 s). Sans GPU, tout fonctionne
+  sur CPU mais plus lentement (≈ 2–2,5 s).
+- Une **clé API Anthropic** (`ANTHROPIC_API_KEY`).
 
 ---
 
 ## Installation (Windows, pas à pas)
 
-Ouvrir **PowerShell** dans le dossier `jarvis/`.
-
-### Option A — avec `uv` (recommandé)
-
-```powershell
-# Installer uv une fois : https://docs.astral.sh/uv/
-uv venv
-.\.venv\Scripts\Activate.ps1
-uv pip install -r requirements.txt
-uv pip install -e .
-```
-
-### Option B — avec venv + pip
+Dans **PowerShell**, depuis le dossier `jarvis/` :
 
 ```powershell
 py -3.11 -m venv .venv
@@ -59,6 +51,17 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+> **GPU** : `faster-whisper` tire automatiquement les bibliothèques CUDA. Pour `torch`
+> (embeddings mémoire + VAD) en version GPU, installe-le depuis l'index PyTorch si besoin :
+> `pip install torch --index-url https://download.pytorch.org/whl/cu124`.
+
+### Modèles à télécharger
+
+- **Wake word** (openWakeWord) et **Whisper** se téléchargent automatiquement au premier lancement.
+- **Voix Piper** : télécharge `fr_FR-siwis-medium.onnx` **et** `fr_FR-siwis-medium.onnx.json`
+  depuis [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main/fr/fr_FR/siwis/medium)
+  et place-les dans `models/piper/`.
+
 ### Configuration
 
 ```powershell
@@ -66,76 +69,96 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-En Phase 0 aucune clé n'est nécessaire : les valeurs par défaut suffisent. La clé
-`ANTHROPIC_API_KEY` devient obligatoire en Phase 2.
+Renseigne au minimum `ANTHROPIC_API_KEY`. Les autres clés (Home Assistant, Tavily,
+ElevenLabs) sont optionnelles — sans elles, les fonctions correspondantes se désactivent
+proprement. Pour les outils fichiers, liste les dossiers autorisés dans
+`JARVIS_ALLOWED_PATHS` (séparés par `;`).
 
 ---
 
-## Lancer et tester la Phase 0
-
-### 1. Exécuter le daemon (démo des fondations)
+## Lancer JARVIS
 
 ```powershell
-python run.py
+python run.py            # Voix + wake word + HUD (tout)
+python run.py --no-ui    # Voix, sans fenêtre
+python run.py --text     # REPL clavier : teste le cerveau et les outils sans micro
+python run.py --dry-run  # Les actions risquées sont simulées (jamais exécutées)
 ```
 
-Attendu : des logs colorés s'affichent, simulant un tour vocal complet sans micro ni
-LLM — `jarvis.starting`, puis les événements `WakeDetected`, `StateChanged`,
-`TranscriptReady`, `AssistantSentence`, et enfin `jarvis.ready`. Un fichier
-`logs/jarvis.jsonl` est créé (logs structurés en JSON, rotatifs).
+- **Raccourci global `Ctrl+Alt+J`** : déclenche l'écoute sans dire le mot-clé.
+- **Échap** : interrompt la parole de Jarvis.
 
-### 2. Lancer les tests
+Le mode `--text` est le plus simple pour commencer : tape une requête, JARVIS répond et
+utilise ses outils exactement comme à la voix.
+
+---
+
+## Tester
 
 ```powershell
 pip install -e ".[dev]"
-pytest
+pytest                 # suite de tests (audio et LLM mockés)
+mypy --strict src\     # typage strict : Success: no issues found
 ```
 
-Attendu : tous les tests passent (bus d'événements, machine à états, configuration).
+---
 
-### 3. Vérifier le typage strict
+## Exemples de commandes
 
-```powershell
-mypy --strict src/
-```
+| Tu dis…                                                   | JARVIS…                                            |
+|-----------------------------------------------------------|----------------------------------------------------|
+| « Hey Jarvis, quelle heure est-il ? »                     | répond l'heure.                                    |
+| « …ouvre Spotify et monte le son à 60 %. »                | ouvre l'app et règle le volume, une seule réponse. |
+| « …quel temps fera-t-il demain à Paris ? »                | interroge Open-Meteo et résume.                    |
+| « …éteins la lumière du salon. »                          | résout `light.salon` et l'éteint (Home Assistant). |
+| « …retiens que je suis allergique aux arachides. »        | le mémorise (SQLite + ChromaDB).                   |
+| « …supprime le fichier X. »                               | demande confirmation avant d'agir.                 |
 
-Attendu : `Success: no issues found`.
+---
+
+## Sécurité
+
+- Chaque outil déclare un niveau : **SAFE** (exécuté), **CONFIRM** (confirmation vocale +
+  visuelle, timeout 15 s → annulation), **FORBIDDEN** (masqué du LLM).
+- `run_command` n'exécute que les binaires d'une **allowlist** (`JARVIS_COMMAND_ALLOWLIST`),
+  jamais via un shell construit depuis la sortie du LLM.
+- Les outils fichiers sont **confinés** à `JARVIS_ALLOWED_PATHS` ; tout accès hors de ces
+  racines est refusé.
+- `--dry-run` journalise les actions à effet de bord sans les exécuter.
+- Chaque appel d'outil est **journalisé** en SQLite (horodatage, arguments, résultat).
 
 ---
 
 ## Notes Windows
 
-- **UTF-8 en console** : `run.py` reconfigure automatiquement `stdout`/`stderr` en UTF-8
-  pour que les accents et emoji des logs s'affichent correctement (`logging_config.py`,
-  `_ensure_utf8_console`).
-- **Couleurs** : `colorama` est inclus pour les couleurs de log dans les terminaux
-  Windows plus anciens ; les terminaux récents (Windows Terminal) le gèrent nativement.
-
-D'autres contournements spécifiques à Windows (pycaw/COM, sounddevice, chemins) seront
-documentés ici au fil des phases qui les introduisent.
+- **UTF-8 console** : reconfiguré automatiquement (`logging_config._ensure_utf8_console`).
+- **pycaw / COM** : l'initialisation COM est faite dans le thread qui contrôle le volume.
+- **Luminosité** : dépend du matériel (DDC) ; en cas d'échec, l'outil le signale sans planter.
+- **Concurrence** : une seule boucle asyncio intégrée à Qt via `qasync`. Les libs bloquantes
+  (Whisper, Piper, pyautogui, pycaw) passent par un thread ; le callback micro temps-réel
+  ne fait que poster les frames.
 
 ---
 
-## Architecture (rappel)
+## Limites connues
 
-Pipeline événementiel, chaque étage remplaçable, articulé autour d'un **EventBus**
-asyncio et d'une **machine à états** `IDLE → LISTENING → THINKING → SPEAKING → IDLE`
-(+ `ERROR`) :
+- **Barge-in vocal « par-dessus » la voix** : couper Jarvis en parlant pendant qu'il parle
+  exige de l'annulation d'écho (AEC) pour ne pas se déclencher sur sa propre sortie. La
+  version actuelle fournit l'interruption fiable par **Échap** (et le raccourci global).
+  L'AEC est prévue comme évolution.
+- Les briques **audio / GPU / Qt** ont été développées et typées, mais doivent être validées
+  sur une vraie machine Windows (micro, GPU, écran). Le **cerveau, les outils, la mémoire et
+  la boucle tool-use** sont couverts par les tests automatisés.
 
-```
-Micro → WakeWord → VAD+Recorder → STT → Orchestrator ⇄ Memory
-                                              │ tool_use
-                                              ▼
-                                         ToolRegistry → (system / files / web / home / memory)
-                                              │
-                                              ▼
-                                         TTS → Haut-parleurs → HUD
-```
+---
 
-- **Modèle de concurrence** : une seule boucle asyncio intégrée à Qt via `qasync`
-  (choisi à partir de la Phase 6). Les libs bloquantes (Whisper, Piper, pyautogui…)
-  passent par un thread pool ; le callback micro temps-réel ne fait que pousser les
-  frames dans une file.
-- **Sécurité** : chaque outil déclare un niveau de risque `SAFE / CONFIRM / FORBIDDEN` ;
-  les actions `CONFIRM` exigent une confirmation vocale **et** visuelle. Mode `--dry-run`
-  pour tester sans effet de bord.
+## Dépannage
+
+- `pip install` échoue sur une version audio/ML/UI → retire l'épingle et laisse pip résoudre
+  (`pip install faster-whisper sounddevice piper-tts …`), puis relance.
+- Pas de voix → vérifie que les fichiers Piper sont dans `models/piper/` (voir plus haut).
+- « ANTHROPIC_API_KEY manquante » → renseigne la clé dans `.env`.
+- Micro introuvable → liste les périphériques avec `python -m sounddevice` et règle
+  `JARVIS_INPUT_DEVICE`.
+
+Voir [`TODO.md`](TODO.md) pour l'état détaillé par phase.
