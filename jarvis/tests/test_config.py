@@ -13,8 +13,8 @@ def test_defaults() -> None:
     assert settings.language == "fr"
     assert settings.tts_provider == "piper"
     assert settings.dry_run is False
-    assert settings.allowed_roots == []
-    assert settings.allowed_commands == []
+    assert settings.allowed_roots == []  # aucune racine fichier par défaut (sandbox fermé)
+    assert "git" in settings.allowed_commands
 
 
 def test_allowed_roots_parsing() -> None:

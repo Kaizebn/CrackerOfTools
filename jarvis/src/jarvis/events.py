@@ -93,6 +93,48 @@ class ErrorOccurred(Event):
     recoverable: bool = True
 
 
+@dataclass(frozen=True)
+class ListeningStarted(Event):
+    """L'enregistrement de la requête a commencé (après le wake word)."""
+
+
+@dataclass(frozen=True)
+class MicAmplitude(Event):
+    """Niveau sonore du micro (0..1), pour animer l'anneau du HUD."""
+
+    level: float
+
+
+@dataclass(frozen=True)
+class AssistantStarted(Event):
+    """Le LLM commence à répondre."""
+
+
+@dataclass(frozen=True)
+class AssistantCompleted(Event):
+    """La réponse (texte + éventuels outils) est terminée."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ConfirmationRequested(Event):
+    request_id: str
+    prompt: str
+
+
+@dataclass(frozen=True)
+class ConfirmationResolved(Event):
+    request_id: str
+    approved: bool
+
+
+@dataclass(frozen=True)
+class ReminderDue(Event):
+    reminder_id: int
+    message: str
+
+
 # Sentinelle poussée dans la file d'un abonnement fermé pour débloquer un itérateur.
 _SHUTDOWN = Event()
 
