@@ -78,6 +78,20 @@ proprement. Pour les outils fichiers, liste les dossiers autorisés dans
 
 ## Lancer JARVIS
 
+### En un double-clic (le plus simple)
+
+Double-clique sur **`start_jarvis.bat`** dans le dossier `jarvis/`.
+- **1er lancement** : il installe tout, puis ouvre `.env` pour que tu colles ta clé API.
+- **Ensuite** : il ouvre directement l'interface (icône dans la barre système + HUD), sans
+  fenêtre noire. Clic droit sur `start_jarvis.bat` → *Envoyer vers → Bureau* pour un
+  raccourci ; pour un démarrage avec Windows, place ce raccourci dans le dossier
+  `shell:startup` (touches Windows+R → `shell:startup`).
+
+> Sans voix Piper installée, l'interface fonctionne quand même : les réponses s'affichent
+> en texte sous l'anneau du HUD (pas de voix tant que Piper n'est pas dans `models/piper/`).
+
+### En ligne de commande
+
 ```powershell
 python run.py            # Voix + wake word + HUD (tout)
 python run.py --no-ui    # Voix, sans fenêtre

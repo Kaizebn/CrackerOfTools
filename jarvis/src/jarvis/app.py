@@ -181,7 +181,17 @@ def run_with_qt(settings: Settings, options: AppOptions) -> None:
     state = StateMachine(bus)
 
     async def _bootstrap() -> None:
-        pipeline, core, _speaker = await _assemble_voice(settings, options, bus, state)
+        try:
+            pipeline, core, _speaker = await _assemble_voice(settings, options, bus, state)
+        except ConfigError as exc:
+            QtWidgets.QMessageBox.critical(None, "JARVIS — configuration", str(exc))
+            app.quit()
+            return
+        except Exception as exc:  # noqa: BLE001 - démarrage audio/Whisper : on montre pourquoi
+            _log.exception("app.startup_failed")
+            QtWidgets.QMessageBox.critical(None, "JARVIS — démarrage", f"Échec du démarrage :\n{exc}")
+            app.quit()
+            return
         hud = HUDWindow()
         hud.show()
         paused = {"value": False}
